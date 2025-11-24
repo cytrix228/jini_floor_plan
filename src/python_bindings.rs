@@ -109,6 +109,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_my_paint, m)?)?;
     m.add_function(wrap_pyfunction!(py_draw_svg, m)?)?;
     m.add_function(wrap_pyfunction!(py_random_room_color, m)?)?;
+    m.add_function(wrap_pyfunction!(py_poisson_disk_sampling, m)?)?;
     m.add_function(wrap_pyfunction!(py_edge2vtvx_wall, m)?)?;
     m.add_function(wrap_pyfunction!(py_loss_lloyd_internal, m)?)?;
     m.add_function(wrap_pyfunction!(py_room2area, m)?)?;
@@ -180,6 +181,23 @@ fn py_draw_svg(
 fn py_random_room_color(seed: Option<u64>) -> PyResult<i32> {
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed.unwrap_or(0));
     Ok(crate::random_room_color(&mut rng))
+}
+
+#[pyfunction(name = "poisson_disk_sampling", signature = (polygon, radius, k, seed=None))]
+fn py_poisson_disk_sampling(
+    polygon: Vec<(f32, f32)>,
+    radius: f32,
+    k: usize,
+    seed: Option<u64>,
+) -> PyResult<Vec<f32>> {
+    if polygon.len() < 3 {
+        return Err(PyValueError::new_err("polygon must contain at least 3 points"));
+    }
+    if radius <= 0.0 {
+        return Err(PyValueError::new_err("radius must be positive"));
+    }
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed.unwrap_or(0));
+    Ok(crate::poisson_disk_sampling(&polygon, radius, k, &mut rng))
 }
 
 #[pyfunction(name = "edge2vtvx_wall")]

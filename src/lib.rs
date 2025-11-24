@@ -181,6 +181,180 @@ pub fn random_room_color<RNG>(reng: &mut RNG) -> i32
     del_canvas_core::color::i32_form_u8rgb(r, g, b)
 }
 
+fn point_in_polygon(point: (f32, f32), polygon: &[(f32, f32)]) -> bool {
+    let (x, y) = point;
+    let mut inside = false;
+    if polygon.is_empty() {
+        return inside;
+    }
+    for i in 0..polygon.len() {
+        let (x0, y0) = polygon[i];
+        let (x1, y1) = polygon[(i + 1) % polygon.len()];
+        let intersects = ((y0 > y) != (y1 > y))
+            && (x < (x1 - x0) * (y - y0) / (y1 - y0 + 1e-9_f32) + x0);
+        if intersects {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+fn add_sample(
+    pt: (f32, f32),
+    samples: &mut Vec<(f32, f32)>,
+    active: &mut Vec<usize>,
+    grid: &mut [i32],
+    min_x: f32,
+    min_y: f32,
+    cell: f32,
+    grid_w: i32,
+    grid_h: i32,
+) {
+    let idx = samples.len();
+    samples.push(pt);
+    active.push(idx);
+    let gx = (((pt.0 - min_x) / cell).floor() as i32).clamp(0, grid_w - 1);
+    let gy = (((pt.1 - min_y) / cell).floor() as i32).clamp(0, grid_h - 1);
+    grid[(gy * grid_w + gx) as usize] = idx as i32;
+}
+
+pub fn poisson_disk_sampling<RNG>(
+    polygon: &[(f32, f32)],
+    radius: f32,
+    k: usize,
+    rng: &mut RNG,
+) -> Vec<f32>
+where
+    RNG: rand::Rng + ?Sized,
+{
+    if polygon.len() < 3 || radius <= 0.0 {
+        return Vec::new();
+    }
+
+    let mut min_x = polygon[0].0;
+    let mut max_x = polygon[0].0;
+    let mut min_y = polygon[0].1;
+    let mut max_y = polygon[0].1;
+    for &(x, y) in polygon.iter().skip(1) {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+
+    let cell = radius / std::f32::consts::SQRT_2;
+    if cell <= 0.0 {
+        return Vec::new();
+    }
+    let grid_w = (((max_x - min_x) / cell).floor() as i32 + 1).max(1);
+    let grid_h = (((max_y - min_y) / cell).floor() as i32 + 1).max(1);
+    let mut grid = vec![-1i32; (grid_w * grid_h) as usize];
+
+    let mut samples: Vec<(f32, f32)> = Vec::new();
+    let mut active: Vec<usize> = Vec::new();
+
+    fn sample_range<R: rand::Rng + ?Sized>(rng: &mut R, start: f32, end: f32) -> f32 {
+        if (end - start).abs() <= f32::EPSILON {
+            start
+        } else {
+            rng.gen_range(start..end)
+        }
+    }
+
+    while samples.is_empty() {
+        let x = sample_range(rng, min_x, max_x);
+        let y = sample_range(rng, min_y, max_y);
+        let candidate = (x, y);
+        if point_in_polygon(candidate, polygon) {
+            add_sample(
+                candidate,
+                &mut samples,
+                &mut active,
+                &mut grid,
+                min_x,
+                min_y,
+                cell,
+                grid_w,
+                grid_h,
+            );
+        }
+    }
+
+    while !active.is_empty() {
+        let idx = rng.gen_range(0..active.len());
+        let base_idx = active[idx];
+        let base = samples[base_idx];
+        let mut found = false;
+        for _ in 0..k {
+            let angle = rng.gen_range(0.0..(2.0 * std::f32::consts::PI));
+            let dist = rng.gen_range(radius..(2.0 * radius));
+            let candidate = (
+                base.0 + angle.cos() * dist,
+                base.1 + angle.sin() * dist,
+            );
+            if candidate.0 < min_x
+                || candidate.0 > max_x
+                || candidate.1 < min_y
+                || candidate.1 > max_y
+            {
+                continue;
+            }
+            if !point_in_polygon(candidate, polygon) {
+                continue;
+            }
+            let gx = (((candidate.0 - min_x) / cell).floor() as i32).clamp(0, grid_w - 1);
+            let gy = (((candidate.1 - min_y) / cell).floor() as i32).clamp(0, grid_h - 1);
+            let mut ok = true;
+            let x_start = (gx - 2).max(0);
+            let x_end = (gx + 2).min(grid_w - 1);
+            let y_start = (gy - 2).max(0);
+            let y_end = (gy + 2).min(grid_h - 1);
+            'outer: for nx in x_start..=x_end {
+                for ny in y_start..=y_end {
+                    let neighbor_idx = grid[(ny * grid_w + nx) as usize];
+                    if neighbor_idx == -1 {
+                        continue;
+                    }
+                    let neighbor = samples[neighbor_idx as usize];
+                    if ((candidate.0 - neighbor.0).powi(2)
+                        + (candidate.1 - neighbor.1).powi(2))
+                        .sqrt()
+                        < radius
+                    {
+                        ok = false;
+                        break 'outer;
+                    }
+                }
+            }
+            if ok {
+                add_sample(
+                    candidate,
+                    &mut samples,
+                    &mut active,
+                    &mut grid,
+                    min_x,
+                    min_y,
+                    cell,
+                    grid_w,
+                    grid_h,
+                );
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            active.swap_remove(idx);
+        }
+    }
+
+    let mut flat = Vec::with_capacity(samples.len() * 2);
+    for (x, y) in samples {
+        flat.push(x);
+        flat.push(y);
+    }
+    flat
+}
+
 pub fn edge2vtvx_wall(voronoi_info: &VoronoiInfo, site2room: &[usize]) -> Vec<usize> {
     let site2idx = &voronoi_info.site2idx;
     let idx2vtxv = &voronoi_info.idx2vtxv;

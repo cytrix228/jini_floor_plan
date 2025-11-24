@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import random
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
@@ -106,80 +105,8 @@ def point_in_polygon(point: Point, polygon: Sequence[Point]) -> bool:
     return inside
 
 
-def poisson_disk_sampling(
-    polygon: Sequence[Point],
-    radius: float,
-    k: int,
-    rng: random.Random,
-) -> List[float]:
-    min_x = min(p[0] for p in polygon)
-    max_x = max(p[0] for p in polygon)
-    min_y = min(p[1] for p in polygon)
-    max_y = max(p[1] for p in polygon)
-    cell = radius / math.sqrt(2)
-    grid_w = int((max_x - min_x) / cell) + 1
-    grid_h = int((max_y - min_y) / cell) + 1
-    grid = [[-1 for _ in range(grid_h)] for _ in range(grid_w)]
-
-    def grid_coords(pt: Point) -> Tuple[int, int]:
-        return int((pt[0] - min_x) / cell), int((pt[1] - min_y) / cell)
-
-    samples: List[Point] = []
-    active: List[Point] = []
-
-    def add_point(pt: Point) -> None:
-        samples.append(pt)
-        active.append(pt)
-        gx, gy = grid_coords(pt)
-        grid[gx][gy] = len(samples) - 1
-
-    while not samples:
-        x = rng.uniform(min_x, max_x)
-        y = rng.uniform(min_y, max_y)
-        candidate = (x, y)
-        if point_in_polygon(candidate, polygon):
-            add_point(candidate)
-
-    while active:
-        idx = rng.randrange(len(active))
-        base = active[idx]
-        found = False
-        for _ in range(k):
-            angle = rng.uniform(0, 2 * math.pi)
-            dist = rng.uniform(radius, 2 * radius)
-            candidate = (base[0] + math.cos(angle) * dist, base[1] + math.sin(angle) * dist)
-            if not (min_x <= candidate[0] <= max_x and min_y <= candidate[1] <= max_y):
-                continue
-            if not point_in_polygon(candidate, polygon):
-                continue
-            gx, gy = grid_coords(candidate)
-            ok = True
-            for nx in range(max(0, gx - 2), min(grid_w, gx + 3)):
-                for ny in range(max(0, gy - 2), min(grid_h, gy + 3)):
-                    neighbor_idx = grid[nx][ny]
-                    if neighbor_idx == -1:
-                        continue
-                    px, py = samples[neighbor_idx]
-                    if math.hypot(candidate[0] - px, candidate[1] - py) < radius:
-                        ok = False
-                        break
-                if not ok:
-                    break
-            if ok:
-                add_point(candidate)
-                found = True
-                break
-        if not found:
-            active.pop(idx)
-
-    flat = []
-    for x, y in samples:
-        flat.extend([x, y])
-    return flat
-
 
 def problem(seed: int):
-    rng = random.Random(seed)
     num_room = 6
     room2color = [fp.random_room_color(seed=7 + i) for i in range(num_room)]
     path_samples = sample_svg_path(400)
@@ -192,7 +119,7 @@ def problem(seed: int):
     total_area = polygon_area(loop)
     sum_ratio = sum(area_ratio)
     room2area_trg = [val / sum_ratio * total_area for val in area_ratio]
-    poisson_points = poisson_disk_sampling(loop, 0.03, 50, rng)
+    poisson_points = fp.poisson_disk_sampling(loop, 0.03, 50, seed)
     site2xy2flag = [0.0] * len(poisson_points)
     site2room = fp.site2room(len(poisson_points) // 2, room2area_trg[:-1])
     poisson_points.extend([0.48, 0.06, 0.52, 0.06])
