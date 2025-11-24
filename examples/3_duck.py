@@ -150,7 +150,7 @@ def main() -> None:
     palette = [0xFFFFFF, 0x000000] + room2color
     target_dir = Path("target")
     target_dir.mkdir(exist_ok=True)
-    canvas = fp.CanvasGif(str(target_dir / "3_duck.gif"), 300, 300, palette)
+    canvas = fp.CanvasGif(str(target_dir / "3_duck.gif"), 1024, 1024, palette)
     fp.optimize(
         canvas,
         vtxl2xy,
