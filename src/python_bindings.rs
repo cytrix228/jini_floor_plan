@@ -274,6 +274,7 @@ fn py_optimize(
     room2area_trg: Vec<f32>,
     room2color: Vec<i32>,
     room_connections: Vec<(usize, usize)>,
+    iter: usize,
 ) -> PyResult<()> {
     let mut canvas_ref = canvas.borrow_mut();
     crate::optimize(
@@ -285,6 +286,7 @@ fn py_optimize(
         room2area_trg,
         room2color,
         room_connections,
+        iter,
     )
     .map_err(anyhow_err)
 }

@@ -1,4 +1,7 @@
 use arrayref::array_ref;
+use std::any::Any;
+use std::backtrace::Backtrace;
+use std::iter;
 use del_candle::voronoi2::VoronoiInfo;
 use del_canvas_core::canvas_gif::Canvas;
 pub mod loss_topo;
@@ -231,6 +234,9 @@ where
         return Vec::new();
     }
 
+    dbg!("Starting Poisson disk sampling...");
+    dbg!( polygon.len() );
+
     let mut min_x = polygon[0].0;
     let mut max_x = polygon[0].0;
     let mut min_y = polygon[0].1;
@@ -241,6 +247,8 @@ where
         min_y = min_y.min(y);
         max_y = max_y.max(y);
     }
+
+    dbg!( min_x, max_x, min_y, max_y );
 
     let cell = radius / std::f32::consts::SQRT_2;
     if cell <= 0.0 {
@@ -265,7 +273,9 @@ where
         let x = sample_range(rng, min_x, max_x);
         let y = sample_range(rng, min_y, max_y);
         let candidate = (x, y);
+        //dbg!( "Trying initial sample at ({}, {})", x, y );
         if point_in_polygon(candidate, polygon) {
+            //dbg!("Adding initial sample at ({}, {})", x, y);
             add_sample(
                 candidate,
                 &mut samples,
@@ -279,6 +289,8 @@ where
             );
         }
     }
+
+    dbg!( "samples length: {}", samples.len() );
 
     while !active.is_empty() {
         let idx = rng.gen_range(0..active.len());
@@ -552,7 +564,7 @@ pub fn site2room(
     site2room
 }
 
-pub fn optimize(
+fn optimize_impl(
     canvas_gif: &mut del_canvas_core::canvas_gif::Canvas,
     vtxl2xy: Vec<f32>,
     site2xy: Vec<f32>,
@@ -560,7 +572,8 @@ pub fn optimize(
     site2xy2flag: Vec<f32>,
     room2area_trg: Vec<f32>,
     room2color: Vec<i32>,
-    room_connections: Vec<(usize, usize)>) -> anyhow::Result<()>
+    room_connections: Vec<(usize, usize)>,
+    iter: usize) -> anyhow::Result<()>
 {
 
     let transform_world2pix = nalgebra::Matrix3::<f32>::new(
@@ -611,7 +624,7 @@ pub fn optimize(
     dbg!(site2room.len());
     let now = Instant::now();
     let mut optimizer = candle_nn::AdamW::new(vec![site2xy.clone()], adamw_params)?;
-    for _iter in 0..250 {
+    for _iter in 0..iter {
         if _iter == 150 {
             let adamw_params = candle_nn::ParamsAdamW {
                 lr: 0.005,
@@ -619,10 +632,18 @@ pub fn optimize(
             };
             optimizer.set_params(adamw_params);
         }
-        let (vtxv2xy, voronoi_info)
-            = del_candle::voronoi2::voronoi(&vtxl2xy, &site2xy, |i_site| {
-            site2room[i_site] != usize::MAX
-        });
+        let (vtxv2xy, voronoi_info) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || del_candle::voronoi2::voronoi(&vtxl2xy, &site2xy, |i_site| {
+                site2room[i_site] != usize::MAX
+            }),
+        ))
+        .map_err(|payload| {
+            let message = panic_payload_to_string(payload.as_ref());
+            let backtrace = Backtrace::force_capture();
+            anyhow::anyhow!(
+                "voronoi() panicked while building geometry: {message}\nBacktrace:\n{backtrace}"
+            )
+        })?;
         let edge2vtxv_wall = crate::edge2vtvx_wall(&voronoi_info, &site2room);
         /*
         if _iter == 0 || _iter == 3 || _iter == 10 || _iter == 100 || _iter == 300 || _iter == 400 {
@@ -754,6 +775,50 @@ pub fn optimize(
     let elapsed = now.elapsed();
     println!("Elapsed: {:.2?}", elapsed);
     Ok(())
+}
+
+pub fn optimize(
+    canvas_gif: &mut del_canvas_core::canvas_gif::Canvas,
+    vtxl2xy: Vec<f32>,
+    site2xy: Vec<f32>,
+    site2room: Vec<usize>,
+    site2xy2flag: Vec<f32>,
+    room2area_trg: Vec<f32>,
+    room2color: Vec<i32>,
+    room_connections: Vec<(usize, usize)>,
+    iter: usize,
+) -> anyhow::Result<()> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        optimize_impl(
+            canvas_gif,
+            vtxl2xy,
+            site2xy,
+            site2room,
+            site2xy2flag,
+            room2area_trg,
+            room2color,
+            room_connections,
+            iter,
+        )
+    }));
+    match result {
+        Ok(inner) => inner,
+        Err(payload) => {
+            let message = panic_payload_to_string(payload.as_ref());
+            let backtrace = Backtrace::force_capture();
+            Err(anyhow::anyhow!("optimize panicked: {message}\nBacktrace:\n{backtrace}"))
+        }
+    }
+}
+
+fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "optimize panicked with non-string payload".to_string()
 }
 
 #[cfg(feature = "python-bindings")]
