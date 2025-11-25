@@ -117,17 +117,21 @@ def optimize(
 	render_interval: int = 1,
 	grad_epsilon: float = 1.0e-3,
 	params: Optional[OptimizeParams] = None,
+	grad_method: str = "spsa",
+	spsa_samples: int = 2,
 ) -> List[float]:
 	"""Run the PyTorch optimizer and return the final flattened coordinates."""
 
 	if params is None:
 		params = load_params()
 
-	device = torch.device("cpu")
+	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+	if device.type == "cuda":
+		print("[optimize] Using CUDA device for tensor ops")
 	site_tensor = torch.nn.Parameter(
 		torch.tensor(site2xy, dtype=torch.float32, device=device).reshape(-1, 2)
 	)
-	site2xy_ini = site_tensor.detach().clone().reshape(-1).tolist()
+	site2xy_ini = site_tensor.detach().to("cpu").clone().reshape(-1).tolist()
 	ctx = OptimizationContext(
 		vtxl2xy=list(vtxl2xy),
 		site2room=[int(v) for v in site2room],
@@ -139,10 +143,13 @@ def optimize(
 		total_area_target=_polygon_area(vtxl2xy),
 	)
 
-	optimizer = torch.optim.AdamW([site_tensor], lr=params.learning_rates.first)
+	lr_scale = 0.25 if grad_method.lower() != "finite_difference" else 1.0
+	optimizer = torch.optim.AdamW(
+		[site_tensor], lr=params.learning_rates.first * lr_scale
+	)
 	lr_schedule = {
-		150: params.learning_rates.second,
-		300: params.learning_rates.third,
+		150: params.learning_rates.second * lr_scale,
+		300: params.learning_rates.third * lr_scale,
 	}
 
 	for iter_idx in range(iterations):
@@ -152,7 +159,16 @@ def optimize(
 				group["lr"] = lr_schedule[iter_idx]
 
 		total_loss, payload = _evaluate_loss(site_tensor, ctx, params, need_details=need_render)
-		grad = _finite_difference_grad(site_tensor, ctx, params, total_loss, grad_epsilon)
+		if grad_method.lower() == "finite_difference":
+			grad = _finite_difference_grad(site_tensor, ctx, params, total_loss, grad_epsilon)
+		else:
+			grad = _spsa_gradient(
+				site_tensor,
+				ctx,
+				params,
+				grad_epsilon,
+				spsa_samples=max(1, spsa_samples),
+			)
 		site_tensor.grad = grad
 		optimizer.step()
 		optimizer.zero_grad(set_to_none=True)
@@ -173,6 +189,7 @@ def optimize(
 	return site_tensor.detach().reshape(-1).tolist()
 
 
+@torch.no_grad()
 def _evaluate_loss(
 	site_tensor: torch.Tensor,
 	ctx: OptimizationContext,
@@ -180,7 +197,7 @@ def _evaluate_loss(
 	*,
 	need_details: bool,
 ) -> Tuple[float, Dict[str, object]]:
-	flat_coords = site_tensor.detach().cpu().reshape(-1).tolist()
+	flat_coords = site_tensor.detach().to("cpu").reshape(-1).tolist()
 	adjusted = _jitter_overlapping_sites(flat_coords, ctx.vtxl2xy)
 	voronoi = fp.VoronoiInfo(ctx.vtxl2xy, adjusted, ctx.site2room)
 	vtxv2xy = voronoi.vtx_coordinates()
@@ -239,6 +256,7 @@ def _evaluate_loss(
 	return float(total), payload
 
 
+@torch.no_grad()
 def _finite_difference_grad(
 	site_tensor: torch.Tensor,
 	ctx: OptimizationContext,
@@ -258,6 +276,24 @@ def _finite_difference_grad(
 		)
 		flat_grad[idx] = (loss_pos - base_loss) / eps
 	return grad
+
+
+@torch.no_grad()
+def _spsa_gradient(
+	site_tensor: torch.Tensor,
+	ctx: OptimizationContext,
+	params: OptimizeParams,
+	eps: float,
+	spsa_samples: int,
+) -> torch.Tensor:
+	grad_accum = torch.zeros_like(site_tensor.detach())
+	base = site_tensor.detach()
+	for _ in range(spsa_samples):
+		delta = torch.empty_like(base).bernoulli_(0.5).mul_(2).sub_(1)
+		loss_pos, _ = _evaluate_loss(base + eps * delta, ctx, params, need_details=False)
+		loss_neg, _ = _evaluate_loss(base - eps * delta, ctx, params, need_details=False)
+		grad_accum += ((loss_pos - loss_neg) / (2.0 * eps)) * delta
+	return grad_accum / float(spsa_samples)
 
 
 def _render(canvas: fp.CanvasGif, ctx: OptimizationContext, payload: Dict[str, object]) -> None:

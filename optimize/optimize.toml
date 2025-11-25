@@ -1,0 +1,11 @@
+[duck_example]
+iterations = 500
+render_interval = 1
+seed = 0
+loop_samples = 400
+resample_target = 100
+poisson_radius = 0.03
+poisson_k = 50
+grad_method = "spsa"
+spsa_samples = 4
+grad_epsilon = 0.001

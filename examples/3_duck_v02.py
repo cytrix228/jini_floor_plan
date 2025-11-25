@@ -1,10 +1,14 @@
 """Python port of examples/3_duck.rs using the PyTorch optimize() shim."""
 from __future__ import annotations
 
-import argparse
 import math
 from pathlib import Path
-from typing import List, Sequence, Tuple
+import sys
+from typing import Any, Dict, List, Sequence, Tuple
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import floorplan as fp
 from optimize.optimize import load_params, optimize as torch_optimize
@@ -15,6 +19,11 @@ except ImportError as exc:  # pragma: no cover - helper dependency
     raise SystemExit(
         "svgpathtools is required for examples/3_duck_v02.py. Install via 'pip install svgpathtools'."
     ) from exc
+
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover
+    import tomli as tomllib  # type: ignore
 
 Point = Tuple[float, float]
 DUCK_PATH = (
@@ -169,15 +178,18 @@ def problem(
     )
 
 
-def main(
-    iterations: int = 1000,
-    render_interval: int = 1,
-    seed: int = 0,
-    loop_samples: int = 400,
-    resample_target: int = 100,
-    poisson_radius: float = 0.03,
-    poisson_k: int = 50,
-) -> None:
+def main(config: Dict[str, Any] | None = None) -> None:
+    config = config or load_optimize_config()
+    iterations = int(config["iterations"])
+    render_interval = int(config["render_interval"])
+    seed = int(config["seed"])
+    loop_samples = int(config["loop_samples"])
+    resample_target = int(config["resample_target"])
+    poisson_radius = float(config["poisson_radius"])
+    poisson_k = int(config["poisson_k"])
+    grad_method = str(config.get("grad_method", "finite_difference"))
+    spsa_samples = int(config.get("spsa_samples", 2))
+    grad_epsilon = float(config.get("grad_epsilon", 1.0e-3))
     write_duck_path_svg(Path("duck_path.svg"))
     (
         vtxl2xy,
@@ -210,25 +222,34 @@ def main(
         canvas=canvas,
         render_interval=render_interval,
         params=load_params(),
+        grad_method=grad_method,
+        spsa_samples=spsa_samples,
+        grad_epsilon=grad_epsilon,
     )
+
+
+def load_optimize_config() -> Dict[str, Any]:
+    defaults: Dict[str, Any] = {
+        "iterations": 1000,
+        "render_interval": 1,
+        "seed": 0,
+        "loop_samples": 400,
+        "resample_target": 100,
+        "poisson_radius": 0.03,
+        "poisson_k": 50,
+        "grad_method": "finite_difference",
+        "spsa_samples": 2,
+        "grad_epsilon": 1.0e-3,
+    }
+    config_path = Path(__file__).resolve().parents[1] / "optimize" / "optimize.toml"
+    if not config_path.exists():
+        return defaults
+    data = tomllib.loads(config_path.read_text())
+    duck_cfg = data.get("duck_example", {})
+    merged = defaults.copy()
+    merged.update({k: duck_cfg[k] for k in merged.keys() & duck_cfg.keys()})
+    return merged
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the PyTorch duck optimizer demo.")
-    parser.add_argument("--iterations", type=int, default=1000, help="Number of optimization iterations.")
-    parser.add_argument("--render-interval", type=int, default=1, help="Write a GIF frame every N iterations.")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed for sampling.")
-    parser.add_argument("--loop-samples", type=int, default=400, help="Number of SVG samples along the duck path.")
-    parser.add_argument("--resample-target", type=int, default=100, help="Number of vertices after resampling.")
-    parser.add_argument("--poisson-radius", type=float, default=0.03, help="Poisson disk radius controlling site density.")
-    parser.add_argument("--poisson-k", type=int, default=50, help="Poisson disk rejection sampling retry count.")
-    args = parser.parse_args()
-    main(
-        iterations=args.iterations,
-        render_interval=args.render_interval,
-        seed=args.seed,
-        loop_samples=args.loop_samples,
-        resample_target=args.resample_target,
-        poisson_radius=args.poisson_radius,
-        poisson_k=args.poisson_k,
-    )
+    main()
