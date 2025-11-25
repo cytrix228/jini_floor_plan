@@ -1,0 +1,23 @@
+/// mark child of bvh nodes for assertion purpose
+/// `vtx2flag` will be incremented
+pub fn mark_child(bvhnodes: &[usize], inode0: usize, vtx2flag: &mut [usize]) {
+    assert!(inode0 < bvhnodes.len() / 3);
+    if bvhnodes[inode0 * 3 + 2] == usize::MAX {
+        // leaf
+        let in0 = bvhnodes[inode0 * 3 + 1];
+        assert!(in0 < vtx2flag.len());
+        vtx2flag[in0] += 1;
+        return;
+    }
+    let in0 = bvhnodes[inode0 * 3 + 1];
+    let in1 = bvhnodes[inode0 * 3 + 2];
+    mark_child(bvhnodes, in0, vtx2flag);
+    mark_child(bvhnodes, in1, vtx2flag);
+}
+
+pub fn check_bvh_topology(bvhnodes: &[usize], num_vtx: usize) {
+    assert_eq!(bvhnodes.len() % 3, 0);
+    let mut vtx2cnt = vec![0usize; num_vtx];
+    mark_child(bvhnodes, 0, &mut vtx2cnt);
+    assert_eq!(vtx2cnt, vec!(1usize; num_vtx));
+}

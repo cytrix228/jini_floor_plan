@@ -29,3 +29,7 @@ del-candle = "=0.1.0"
 pyo3 = { version = "=0.21.2", features = ["extension-module"], optional = true }
 
 
+[patch.crates-io]
+del-msh-core = { path = "vendor/del-msh-core" }
+
+

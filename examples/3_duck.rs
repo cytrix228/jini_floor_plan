@@ -45,7 +45,7 @@ fn problem(seed: u64) -> (
         let vtxl2xy = del_msh_core::vtx2vec::normalize2(&vtxl2xy, &nalgebra::Vector2::<f32>::new(0.5, 0.5), 1.0);
         // dbg!(&vtxl2xy);
         dbg!(vtxl2xy.len());
-        del_msh_core::io_obj::save_vtx2vecn_as_polyloop("target/loop.obj", &vtxl2xy);
+        let _ = del_msh_core::io_obj::save_vtx2vecn_as_polyloop("target/loop.obj", &vtxl2xy);
         del_msh_core::vtx2xdim::from_array_of_nalgebra(&vtxl2xy)
     };
     dbg!(&vtxl2xy);
@@ -94,6 +94,7 @@ fn main() -> anyhow::Result<()> {
     floorplan::optimize(
         &mut canvas_gif, vtxl2xy,
         site2xy, site2room, site2xy2flag,
-        room2area_trg, room2color, room_connections)?;
+        room2area_trg, room2color, room_connections,
+        400)?;
     Ok(())
 }

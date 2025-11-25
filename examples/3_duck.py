@@ -33,6 +33,20 @@ DUCK_PATH = (
 )
 
 
+def write_duck_path_svg(output: Path) -> None:
+        path = parse_path(DUCK_PATH)
+        xmin, xmax, ymin, ymax = path.bbox()
+        width = xmax - xmin
+        height = ymax - ymin
+        stroke_width = max(width, height) * 0.001
+        y_reflect = ymin + ymax
+        svg = f"""<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"{xmin} {ymin} {width} {height}\">
+    <path d=\"{DUCK_PATH}\" fill=\"#FFD700\" stroke=\"black\" stroke-width=\"{stroke_width}\" transform=\"matrix(1 0 0 -1 0 {y_reflect})\" />
+</svg>
+"""
+        output.write_text(svg)
+
+
 def sample_svg_path(num_samples: int) -> List[Point]:
     path = parse_path(DUCK_PATH)
     total_length = path.length()
@@ -163,6 +177,7 @@ def problem(seed: int):
 
 
 def main() -> None:
+    write_duck_path_svg(Path("duck_path.svg"))
     (
         vtxl2xy,
         site2xy,
@@ -184,7 +199,7 @@ def main() -> None:
         site2xy2flag,
         room2area_trg,
         room2color,
-        room_connections, 500
+        room_connections, 1000
     )
 
 

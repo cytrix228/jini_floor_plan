@@ -377,8 +377,6 @@ dependencies = [
 [[package]]
 name = "del-msh-core"
 version = "0.1.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ed064ae898c53f74bad6a30945c3cfaac27aef0825f2435a03011fc99456191"
 dependencies = [
  "anyhow",
  "arrayref",
