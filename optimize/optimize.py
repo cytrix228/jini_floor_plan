@@ -146,17 +146,18 @@ def optimize(
 	}
 
 	for iter_idx in range(iterations):
+		need_render = canvas is not None and (iter_idx % render_interval == 0)
 		if iter_idx in lr_schedule:
 			for group in optimizer.param_groups:
 				group["lr"] = lr_schedule[iter_idx]
 
-		total_loss, render_payload = _evaluate_loss(site_tensor, ctx, params, need_details=True)
+		total_loss, payload = _evaluate_loss(site_tensor, ctx, params, need_details=need_render)
 		grad = _finite_difference_grad(site_tensor, ctx, params, total_loss, grad_epsilon)
 		site_tensor.grad = grad
 		optimizer.step()
 		optimizer.zero_grad(set_to_none=True)
 
-		metrics = render_payload["metrics"]
+		metrics = payload["metrics"]
 		print(
 			f"iter={iter_idx:04d} loss={total_loss:.6f} "
 			f"areas={metrics['each_area']:.6f} total={metrics['total_area']:.6f} "
@@ -164,7 +165,9 @@ def optimize(
 			f"fix={metrics['fix']:.6f} lloyd={metrics['lloyd']:.6f}"
 		)
 
-		if canvas is not None and (iter_idx % render_interval == 0):
+		if need_render and canvas is not None:
+			# Recompute loss to capture the post-update geometry for visualization.
+			_, render_payload = _evaluate_loss(site_tensor, ctx, params, need_details=True)
 			_render(canvas, ctx, render_payload)
 
 	return site_tensor.detach().reshape(-1).tolist()
