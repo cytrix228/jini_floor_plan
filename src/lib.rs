@@ -1,10 +1,119 @@
-use arrayref::array_ref;
+use anyhow::Context;
 use candle_nn::Optimizer;
-use std::any::Any;
-use std::backtrace::Backtrace;
 use del_candle::voronoi2::VoronoiInfo;
 use del_canvas_core::canvas_gif::Canvas;
+use serde::Deserialize;
+use std::any::Any;
+use std::backtrace::Backtrace;
+use std::path::Path;
+use std::sync::OnceLock;
 pub mod loss_topo;
+
+static PROJECT_PARAMS: OnceLock<ProjectParams> = OnceLock::new();
+
+#[derive(Debug, Deserialize)]
+struct ProjectParams {
+    #[serde(default)]
+    loss_weights: LossWeights,
+    #[serde(default)]
+    learning_rates: LearningRates,
+}
+
+impl Default for ProjectParams {
+    fn default() -> Self {
+        Self {
+            loss_weights: LossWeights::default(),
+            learning_rates: LearningRates::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LossWeights {
+    #[serde(default = "LossWeights::default_each_area")]
+    each_area: f32,
+    #[serde(default = "LossWeights::default_total_area")]
+    total_area: f32,
+    #[serde(default = "LossWeights::default_wall_length")]
+    wall_length: f32,
+    #[serde(default = "LossWeights::default_topology")]
+    topology: f32,
+    #[serde(default = "LossWeights::default_fix")]
+    fix: f32,
+    #[serde(default = "LossWeights::default_lloyd")]
+    lloyd: f32,
+}
+
+impl LossWeights {
+    const fn default_each_area() -> f32 { 5.0 }
+    const fn default_total_area() -> f32 { 10.0 }
+    const fn default_wall_length() -> f32 { 1.0 }
+    const fn default_topology() -> f32 { 10.0 }
+    const fn default_fix() -> f32 { 100.0 }
+    const fn default_lloyd() -> f32 { 0.1 }
+}
+
+impl Default for LossWeights {
+    fn default() -> Self {
+        Self {
+            each_area: Self::default_each_area(),
+            total_area: Self::default_total_area(),
+            wall_length: Self::default_wall_length(),
+            topology: Self::default_topology(),
+            fix: Self::default_fix(),
+            lloyd: Self::default_lloyd(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LearningRates {
+    #[serde(default = "LearningRates::default_first")]
+    first: f32,
+    #[serde(default = "LearningRates::default_second")]
+    second: f32,
+    #[serde(default = "LearningRates::default_third")]
+    third: f32,
+}
+
+impl LearningRates {
+    const fn default_first() -> f32 { 0.05 }
+    const fn default_second() -> f32 { 0.005 }
+    const fn default_third() -> f32 { 0.001 }
+}
+
+impl Default for LearningRates {
+    fn default() -> Self {
+        Self {
+            first: Self::default_first(),
+            second: Self::default_second(),
+            third: Self::default_third(),
+        }
+    }
+}
+
+fn load_project_params() -> anyhow::Result<ProjectParams> {
+    let path = Path::new("params.toml");
+    if !path.exists() {
+        return Ok(ProjectParams::default());
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let params: ProjectParams = toml::from_str(&raw)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    Ok(params)
+}
+
+fn project_params() -> anyhow::Result<&'static ProjectParams> {
+    if let Some(params) = PROJECT_PARAMS.get() {
+        return Ok(params);
+    }
+    let params = load_project_params()?;
+    let _ = PROJECT_PARAMS.set(params);
+    Ok(PROJECT_PARAMS
+        .get()
+        .expect("project parameters should be initialized"))
+}
 
 pub fn my_paint(
     canvas: &mut Canvas,
@@ -644,6 +753,8 @@ fn optimize_iteration(
     Vec<usize>,
 )> {
     let (num_rooms, _) = room2area_trg.dims2()?;
+    let params = project_params()?;
+    let loss_weights = &params.loss_weights;
     let site2xy_adjusted = jitter_overlapping_sites(site2xy, vtxl2xy)?;
     let (vtxv2xy, voronoi_info) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || del_candle::voronoi2::voronoi(vtxl2xy, &site2xy_adjusted, |i_site| {
@@ -697,12 +808,12 @@ fn optimize_iteration(
         &site2xy_adjusted,
         &vtxv2xy,
     )?;
-    let loss_each_area = loss_each_area.affine(5.0, 0.0)?.clone();
-    let loss_total_area = loss_total_area.affine(10.0, 0.0)?.clone();
-    let loss_walllen = loss_walllen.affine(1.0, 0.0)?;
-    let loss_topo = loss_topo.affine(10., 0.0)?;
-    let loss_fix = loss_fix.affine(100., 0.0)?;
-    let loss_lloyd = loss_lloyd.affine(0.1, 0.0)?;
+    let loss_each_area = loss_each_area.affine(loss_weights.each_area as f64, 0.0)?.clone();
+    let loss_total_area = loss_total_area.affine(loss_weights.total_area as f64, 0.0)?.clone();
+    let loss_walllen = loss_walllen.affine(loss_weights.wall_length as f64, 0.0)?;
+    let loss_topo = loss_topo.affine(loss_weights.topology as f64, 0.0)?;
+    let loss_fix = loss_fix.affine(loss_weights.fix as f64, 0.0)?;
+    let loss_lloyd = loss_lloyd.affine(loss_weights.lloyd as f64, 0.0)?;
     let loss = (
         loss_each_area
             + loss_total_area
@@ -766,8 +877,10 @@ fn optimize_impl(
         )
             .unwrap()
     };
+    let params = project_params()?;
+    let learning_rates = &params.learning_rates;
     let adamw_params = candle_nn::ParamsAdamW {
-        lr: 0.05,
+        lr: learning_rates.first as f64,
         ..Default::default()
     };
     use std::time::Instant;
@@ -777,14 +890,14 @@ fn optimize_impl(
     for iter_idx in 0..iter {
         if iter_idx == 150 {
             let adamw_params = candle_nn::ParamsAdamW {
-                lr: 0.005,
+                lr: learning_rates.second as f64,
                 ..Default::default()
             };
             optimizer.set_params(adamw_params);
         }
         if iter_idx == 300 {
             let adamw_params = candle_nn::ParamsAdamW {
-                lr: 0.001,
+                lr: learning_rates.third as f64,
                 ..Default::default()
             };
             optimizer.set_params(adamw_params);

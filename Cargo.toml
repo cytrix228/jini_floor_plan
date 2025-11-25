@@ -27,6 +27,8 @@ del-msh-core = "=0.1.34"
 del-canvas-core = "=0.1.1"
 del-candle = "=0.1.0"
 pyo3 = { version = "=0.21.2", features = ["extension-module"], optional = true }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
 
 
 [patch.crates-io]
