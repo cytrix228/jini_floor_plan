@@ -1,6 +1,7 @@
 """Python port of examples/3_duck.rs using the PyTorch optimize() shim."""
 from __future__ import annotations
 
+import argparse
 import math
 from pathlib import Path
 from typing import List, Sequence, Tuple
@@ -126,12 +127,18 @@ def point_in_polygon(point: Point, polygon: Sequence[Point]) -> bool:
     return inside
 
 
-def problem(seed: int):
+def problem(
+    seed: int,
+    loop_samples: int = 400,
+    resample_target: int = 100,
+    poisson_radius: float = 0.03,
+    poisson_k: int = 50,
+):
     num_room = 6
     room2color = [fp.random_room_color(seed=7 + i) for i in range(num_room)]
 
-    path_samples = sample_svg_path(400)
-    loop = resample_polyloop(path_samples, 100)
+    path_samples = sample_svg_path(loop_samples)
+    loop = resample_polyloop(path_samples, resample_target)
 
     loop = normalize_loop(loop)
 
@@ -143,7 +150,7 @@ def problem(seed: int):
     sum_ratio = sum(area_ratio)
     room2area_trg = [val / sum_ratio * total_area for val in area_ratio]
 
-    poisson_points = fp.poisson_disk_sampling(loop, 0.03, 50, seed)
+    poisson_points = fp.poisson_disk_sampling(loop, poisson_radius, poisson_k, seed)
 
     site2xy2flag = [0.0] * len(poisson_points)
     site2room = fp.site2room(len(poisson_points) // 2, room2area_trg[:-1])
@@ -162,7 +169,15 @@ def problem(seed: int):
     )
 
 
-def main() -> None:
+def main(
+    iterations: int = 1000,
+    render_interval: int = 1,
+    seed: int = 0,
+    loop_samples: int = 400,
+    resample_target: int = 100,
+    poisson_radius: float = 0.03,
+    poisson_k: int = 50,
+) -> None:
     write_duck_path_svg(Path("duck_path.svg"))
     (
         vtxl2xy,
@@ -172,7 +187,13 @@ def main() -> None:
         room2area_trg,
         room2color,
         room_connections,
-    ) = problem(0)
+    ) = problem(
+        seed,
+        loop_samples=loop_samples,
+        resample_target=resample_target,
+        poisson_radius=poisson_radius,
+        poisson_k=poisson_k,
+    )
     palette = [0xFFFFFF, 0x000000] + room2color
     target_dir = Path("target")
     target_dir.mkdir(exist_ok=True)
@@ -185,10 +206,29 @@ def main() -> None:
         room2area_trg,
         room2color,
         room_connections,
-        iterations=1000,
+        iterations=iterations,
         canvas=canvas,
-        render_interval=1,
+        render_interval=render_interval,
         params=load_params(),
     )
+
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run the PyTorch duck optimizer demo.")
+    parser.add_argument("--iterations", type=int, default=1000, help="Number of optimization iterations.")
+    parser.add_argument("--render-interval", type=int, default=1, help="Write a GIF frame every N iterations.")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for sampling.")
+    parser.add_argument("--loop-samples", type=int, default=400, help="Number of SVG samples along the duck path.")
+    parser.add_argument("--resample-target", type=int, default=100, help="Number of vertices after resampling.")
+    parser.add_argument("--poisson-radius", type=float, default=0.03, help="Poisson disk radius controlling site density.")
+    parser.add_argument("--poisson-k", type=int, default=50, help="Poisson disk rejection sampling retry count.")
+    args = parser.parse_args()
+    main(
+        iterations=args.iterations,
+        render_interval=args.render_interval,
+        seed=args.seed,
+        loop_samples=args.loop_samples,
+        resample_target=args.resample_target,
+        poisson_radius=args.poisson_radius,
+        poisson_k=args.poisson_k,
+    )

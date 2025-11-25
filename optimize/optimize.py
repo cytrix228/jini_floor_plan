@@ -18,7 +18,7 @@ Notes
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -52,8 +52,8 @@ class LearningRates:
 
 @dataclass
 class OptimizeParams:
-	loss_weights: LossWeights = LossWeights()
-	learning_rates: LearningRates = LearningRates()
+	loss_weights: LossWeights = field(default_factory=LossWeights)
+	learning_rates: LearningRates = field(default_factory=LearningRates)
 
 
 @dataclass(frozen=True)
