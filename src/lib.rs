@@ -270,11 +270,11 @@ pub fn my_paint(
             })) {
                 let bt = Backtrace::force_capture();
                 eprintln!(
-                    "[floorplan] rasterize_line::draw_dda_with_transformation panicked (i_site={i_site}, i0_vtx={i0_vtx}, i1_vtx={i1_vtx}, i0={i0}, i1={i1}, p0={p0:?}, p1={p1:?},\n vtxv2xy={vtxv2xy:?})\n{}\n{}",
+                    "[floorplan] rasterize_line::draw_dda_with_transformation panicked (i_site={i_site}, i0_vtx={i0_vtx}, i1_vtx={i1_vtx}, i0={i0}, i1={i1}, p0={p0:?}, p1={p1:?},\n)\n{}\n{}",
                     panic_payload_to_string(payload.as_ref()),
                     bt
                 );
-                //std::process::exit(1);
+                std::process::exit(1);
             }
         }
     }
