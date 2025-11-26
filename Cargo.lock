@@ -304,8 +304,6 @@ dependencies = [
 [[package]]
 name = "del-canvas-core"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba24a97483a589c636a7f23da1c993a16a9cbbc6603830019b8be18a92ded46"
 dependencies = [
  "anyhow",
  "arrayref",
