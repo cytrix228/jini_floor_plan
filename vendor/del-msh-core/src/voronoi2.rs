@@ -142,7 +142,7 @@ pub fn cut_polygon_by_line(
             //
             vtxnews.push((-t0, i0_vtx, pm, info));
         }
-        vtxnews.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        vtxnews.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut filtered: Vec<(f32, usize, nalgebra::Vector2<f32>, [usize; 4])> = Vec::with_capacity(vtxnews.len());
         for entry in vtxnews.into_iter() {
             let is_duplicate = filtered
@@ -236,7 +236,7 @@ where
             let dist = if is_inside { 0. } else { 1.0 / cell.area() };
             depthcell.push((dist, i_cell));
         }
-        depthcell.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        depthcell.sort_by(|a, b| a.0.total_cmp(&b.0));
         let i_cell = depthcell[0].1;
         assert!(!cell_stack[i_cell].vtx2xy.is_empty());
         site2cell[i_site] = cell_stack[i_cell].clone();

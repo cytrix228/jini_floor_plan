@@ -1,0 +1,12 @@
+[loss_weights]
+each_area = 7.0
+total_area = 10.0
+wall_length = 5.0
+topology = 20.0
+fix = 100.0
+lloyd = 0.5
+
+[learning_rates]
+first = 0.025
+second = 0.005
+third = 0.0005

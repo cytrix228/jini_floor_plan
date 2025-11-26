@@ -191,16 +191,32 @@ def main() -> None:
     target_dir = Path("target")
     target_dir.mkdir(exist_ok=True)
     canvas = fp.CanvasGif(str(target_dir / "3_duck.gif"), 1024, 1024, palette)
-    fp.optimize(
-        canvas,
-        vtxl2xy,
-        site2xy,
-        site2room,
-        site2xy2flag,
-        room2area_trg,
-        room2color,
-        room_connections, 1000
-    )
+    try:
+        fp.optimize(
+            canvas,
+            vtxl2xy,
+            site2xy,
+            site2room,
+            site2xy2flag,
+            room2area_trg,
+            room2color,
+            room_connections,
+            1000,
+            0,
+        )
+    except TypeError:
+        print(" Error : optimize() missing required positional arguments.")
+        # fp.optimize(
+        #     canvas,
+        #     vtxl2xy,
+        #     site2xy,
+        #     site2room,
+        #     site2xy2flag,
+        #     room2area_trg,
+        #     room2color,
+        #     room_connections,
+        #     1000,
+        # )
 
 
 if __name__ == "__main__":

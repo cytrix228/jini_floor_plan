@@ -225,6 +225,7 @@ def main(config: Dict[str, Any] | None = None) -> None:
         grad_method=grad_method,
         spsa_samples=spsa_samples,
         grad_epsilon=grad_epsilon,
+        nn_scale=0.0001
     )
 
 

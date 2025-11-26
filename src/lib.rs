@@ -5,11 +5,12 @@ use del_canvas_core::canvas_gif::Canvas;
 use serde::Deserialize;
 use std::any::Any;
 use std::backtrace::Backtrace;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Instant;
 pub mod loss_topo;
 
-static PROJECT_PARAMS: OnceLock<ProjectParams> = OnceLock::new();
+static PROJECT_PARAMS: OnceLock<Vec<ProjectParams>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 struct ProjectParams {
@@ -45,12 +46,26 @@ struct LossWeights {
 }
 
 impl LossWeights {
-    const fn default_each_area() -> f32 { 5.0 }
-    const fn default_total_area() -> f32 { 10.0 }
-    const fn default_wall_length() -> f32 { 1.0 }
-    const fn default_topology() -> f32 { 10.0 }
-    const fn default_fix() -> f32 { 100.0 }
-    const fn default_lloyd() -> f32 { 0.1 }
+    const fn default_wall_length() -> f32 {
+        1.0
+    }
+
+    const fn default_topology() -> f32 {
+        10.0
+    }
+
+    const fn default_fix() -> f32 {
+        50.0
+    }
+    const fn default_lloyd() -> f32 {
+        0.5
+    }
+    const fn default_each_area() -> f32 {
+        5.0
+    }
+    const fn default_total_area() -> f32 {
+        20.0
+    }
 }
 
 impl Default for LossWeights {
@@ -77,9 +92,15 @@ struct LearningRates {
 }
 
 impl LearningRates {
-    const fn default_first() -> f32 { 0.05 }
-    const fn default_second() -> f32 { 0.005 }
-    const fn default_third() -> f32 { 0.001 }
+    const fn default_first() -> f32 {
+        0.05
+    }
+    const fn default_second() -> f32 {
+        0.005
+    }
+    const fn default_third() -> f32 {
+        0.001
+    }
 }
 
 impl Default for LearningRates {
@@ -92,27 +113,65 @@ impl Default for LearningRates {
     }
 }
 
-fn load_project_params() -> anyhow::Result<ProjectParams> {
-    let path = Path::new("params.toml");
-    if !path.exists() {
-        return Ok(ProjectParams::default());
+fn load_project_params() -> anyhow::Result<Vec<ProjectParams>> {
+    let mut param_files: Vec<PathBuf> = std::fs::read_dir(Path::new("."))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.to_ascii_lowercase())
+                    .map(|name| name.starts_with("param") && name.ends_with(".toml"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    param_files.sort();
+
+    if param_files.is_empty() {
+        let legacy = Path::new("params.toml");
+        if legacy.exists() {
+            param_files.push(legacy.to_path_buf());
+        }
     }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let params: ProjectParams = toml::from_str(&raw)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
-    Ok(params)
+
+    if param_files.is_empty() {
+        return Ok(vec![ProjectParams::default()]);
+    }
+
+    let mut params_list = Vec::with_capacity(param_files.len());
+    for path in param_files {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let params: ProjectParams =
+            toml::from_str(&raw).with_context(|| format!("Failed to parse {}", path.display()))?;
+        params_list.push(params);
+    }
+    Ok(params_list)
 }
 
-fn project_params() -> anyhow::Result<&'static ProjectParams> {
-    if let Some(params) = PROJECT_PARAMS.get() {
-        return Ok(params);
-    }
-    let params = load_project_params()?;
-    let _ = PROJECT_PARAMS.set(params);
-    Ok(PROJECT_PARAMS
-        .get()
-        .expect("project parameters should be initialized"))
+fn all_project_params() -> &'static Vec<ProjectParams> {
+    PROJECT_PARAMS.get_or_init(|| {
+        load_project_params().unwrap_or_else(|err| {
+            eprintln!(
+                "[floorplan] Failed to load param*.toml files ({}); using a single default",
+                err
+            );
+            vec![ProjectParams::default()]
+        })
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn project_params(index: usize) -> &'static ProjectParams {
+    all_project_params()
+        .get(index)
+        .unwrap_or_else(|| panic!("project parameters index {} out of range", index))
+}
+
+pub(crate) fn project_params_all() -> &'static [ProjectParams] {
+    all_project_params()
 }
 
 pub fn my_paint(
@@ -197,14 +256,26 @@ pub fn my_paint(
             let i1_vtx = (i0_vtx + 1) % num_vtx_in_site;
             let i0 = idx2vtxv[site2idx[i_site] + i0_vtx];
             let i1 = idx2vtxv[site2idx[i_site] + i1_vtx];
-            del_canvas_core::rasterize_line::draw_dda_with_transformation(
-                &mut canvas.data,
-                canvas.width,
-                &[vtxv2xy[i0 * 2 + 0], vtxv2xy[i0 * 2 + 1]],
-                &[vtxv2xy[i1 * 2 + 0], vtxv2xy[i1 * 2 + 1]],
-                arrayref::array_ref![transform_to_scr.as_slice(),0,9],
-                1,
-            );
+            let p0 = &[vtxv2xy[i0 * 2 + 0], vtxv2xy[i0 * 2 + 1]];
+            let p1 = &[vtxv2xy[i1 * 2 + 0], vtxv2xy[i1 * 2 + 1]];
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                del_canvas_core::rasterize_line::draw_dda_with_transformation(
+                    &mut canvas.data,
+                    canvas.width,
+                    p0,
+                    p1,
+                    arrayref::array_ref![transform_to_scr.as_slice(),0,9],
+                    1,
+                );
+            })) {
+                let bt = Backtrace::force_capture();
+                eprintln!(
+                    "[floorplan] rasterize_line::draw_dda_with_transformation panicked (i_site={i_site}, i0_vtx={i0_vtx}, i1_vtx={i1_vtx}, i0={i0}, i1={i1}, p0={p0:?}, p1={p1:?},\n vtxv2xy={vtxv2xy:?})\n{}\n{}",
+                    panic_payload_to_string(payload.as_ref()),
+                    bt
+                );
+                //std::process::exit(1);
+            }
         }
     }
     // draw room boundary
@@ -221,15 +292,26 @@ pub fn my_paint(
             1,
         );
     }
-    del_canvas_core::rasterize_polygon::stroke(
-                                           &mut canvas.data,
-                                           canvas.width,
-                                           &vtxl2xy,
-                                           arrayref::array_ref![transform_to_scr.as_slice(),0,9],
-                                           1.6,
-                                           1,
-    );
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        del_canvas_core::rasterize_polygon::stroke(
+            &mut canvas.data,
+            canvas.width,
+            &vtxl2xy,
+            arrayref::array_ref![transform_to_scr.as_slice(), 0, 9],
+            1.6,
+            1,
+        );
+    })) {
+        let bt = Backtrace::force_capture();
+        eprintln!(
+            "[floorplan] rasterize_polygon::stroke panicked: {}\n{}",
+            panic_payload_to_string(payload.as_ref()),
+            bt
+        );
+        std::process::exit(1);
+    }
 }
+
 
 pub fn draw_svg(
     file_path: String,
@@ -240,29 +322,37 @@ pub fn draw_svg(
     vtxv2xy: &[f32],
     site2room: &[usize],
     edge2vtxv_wall: &[usize],
-    room2color: &[i32])
-{
+    room2color: &[i32],
+) {
     let mut canvas_svg = del_canvas_core::canvas_svg::Canvas::new(file_path, (300, 300));
     {
-//        let vtxv2xy = vtxv2xy.flatten_all()?.to_vec1()?;
+        //        let vtxv2xy = vtxv2xy.flatten_all()?.to_vec1()?;
         for i_site in 0..voronoi_info.site2idx.len() - 1 {
-            let mut hoge = vec!();
-            for &i_vtxv in &voronoi_info.idx2vtxv[voronoi_info.site2idx[i_site]..voronoi_info.site2idx[i_site + 1]] {
+            let mut hoge = vec![];
+            for &i_vtxv in &voronoi_info.idx2vtxv
+                [voronoi_info.site2idx[i_site]..voronoi_info.site2idx[i_site + 1]]
+            {
                 hoge.push(vtxv2xy[i_vtxv * 2 + 0]);
                 hoge.push(vtxv2xy[i_vtxv * 2 + 1]);
             }
             let i_room = site2room[i_site];
             let i_color = room2color[i_room];
-            canvas_svg.polyloop(&hoge, &transform_to_scr, Some(0x333333), Some(0.1), Some(i_color));
+            canvas_svg.polyloop(
+                &hoge,
+                &transform_to_scr,
+                Some(0x333333),
+                Some(0.1),
+                Some(i_color),
+            );
         }
         for i_edge in 0..edge2vtxv_wall.len() / 2 {
-            let i0_vtxv = edge2vtxv_wall[i_edge*2+0];
-            let i1_vtxv = edge2vtxv_wall[i_edge*2+1];
-            let x0 = vtxv2xy[i0_vtxv*2+0];
-            let y0 = vtxv2xy[i0_vtxv*2+1];
-            let x1 = vtxv2xy[i1_vtxv*2+0];
-            let y1 = vtxv2xy[i1_vtxv*2+1];
-            canvas_svg.line(x0,y0, x1,y1, &transform_to_scr, Some(2.0));
+            let i0_vtxv = edge2vtxv_wall[i_edge * 2 + 0];
+            let i1_vtxv = edge2vtxv_wall[i_edge * 2 + 1];
+            let x0 = vtxv2xy[i0_vtxv * 2 + 0];
+            let y0 = vtxv2xy[i0_vtxv * 2 + 1];
+            let x1 = vtxv2xy[i1_vtxv * 2 + 0];
+            let y1 = vtxv2xy[i1_vtxv * 2 + 1];
+            canvas_svg.line(x0, y0, x1, y1, &transform_to_scr, Some(2.0));
         }
     }
     canvas_svg.polyloop(vtxl2xy, &transform_to_scr, Some(0x000000), Some(2.0), None);
@@ -270,16 +360,20 @@ pub fn draw_svg(
         //let site2xy = site2xy.flatten_all()?.to_vec1()?;
         for i_vtx in 0..site2xy.len() / 2 {
             canvas_svg.circle(
-                site2xy[i_vtx * 2 + 0], site2xy[i_vtx * 2 + 1],
-                &transform_to_scr, 1., "#FF0000");
+                site2xy[i_vtx * 2 + 0],
+                site2xy[i_vtx * 2 + 1],
+                &transform_to_scr,
+                1.,
+                "#FF0000",
+            );
         }
     }
     canvas_svg.write();
 }
 
-
 pub fn random_room_color<RNG>(reng: &mut RNG) -> i32
-    where RNG: rand::Rng
+where
+    RNG: rand::Rng,
 {
     let h = reng.gen::<f32>();
     let s = reng.gen::<f32>();
@@ -302,8 +396,8 @@ fn point_in_polygon(point: (f32, f32), polygon: &[(f32, f32)]) -> bool {
     for i in 0..polygon.len() {
         let (x0, y0) = polygon[i];
         let (x1, y1) = polygon[(i + 1) % polygon.len()];
-        let intersects = ((y0 > y) != (y1 > y))
-            && (x < (x1 - x0) * (y - y0) / (y1 - y0 + 1e-9_f32) + x0);
+        let intersects =
+            ((y0 > y) != (y1 > y)) && (x < (x1 - x0) * (y - y0) / (y1 - y0 + 1e-9_f32) + x0);
         if intersects {
             inside = !inside;
         }
@@ -344,7 +438,7 @@ where
     }
 
     dbg!("Starting Poisson disk sampling...");
-    dbg!( polygon.len() );
+    dbg!(polygon.len());
 
     let mut min_x = polygon[0].0;
     let mut max_x = polygon[0].0;
@@ -357,7 +451,7 @@ where
         max_y = max_y.max(y);
     }
 
-    dbg!( min_x, max_x, min_y, max_y );
+    dbg!(min_x, max_x, min_y, max_y);
 
     let cell = radius / std::f32::consts::SQRT_2;
     if cell <= 0.0 {
@@ -399,7 +493,7 @@ where
         }
     }
 
-    dbg!( "samples length: {}", samples.len() );
+    dbg!("samples length: {}", samples.len());
 
     while !active.is_empty() {
         let idx = rng.gen_range(0..active.len());
@@ -409,10 +503,7 @@ where
         for _ in 0..k {
             let angle = rng.gen_range(0.0..(2.0 * std::f32::consts::PI));
             let dist = rng.gen_range(radius..(2.0 * radius));
-            let candidate = (
-                base.0 + angle.cos() * dist,
-                base.1 + angle.sin() * dist,
-            );
+            let candidate = (base.0 + angle.cos() * dist, base.1 + angle.sin() * dist);
             if candidate.0 < min_x
                 || candidate.0 > max_x
                 || candidate.1 < min_y
@@ -437,8 +528,7 @@ where
                         continue;
                     }
                     let neighbor = samples[neighbor_idx as usize];
-                    if ((candidate.0 - neighbor.0).powi(2)
-                        + (candidate.1 - neighbor.1).powi(2))
+                    if ((candidate.0 - neighbor.0).powi(2) + (candidate.1 - neighbor.1).powi(2))
                         .sqrt()
                         < radius
                     {
@@ -510,20 +600,21 @@ pub fn edge2vtvx_wall(voronoi_info: &VoronoiInfo, site2room: &[usize]) -> Vec<us
     edge2vtxv
 }
 
-
 pub fn loss_lloyd_internal(
     voronoi_info: &VoronoiInfo,
     site2room: &[usize],
     site2xy: &candle_core::Var,
-    vtxv2xy: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
+    vtxv2xy: &candle_core::Tensor,
+) -> candle_core::Result<candle_core::Tensor> {
     let num_site = site2room.len();
-    assert_eq!(voronoi_info.site2idx.len()-1, num_site);
+    assert_eq!(voronoi_info.site2idx.len() - 1, num_site);
     let site2idx = &voronoi_info.site2idx;
     // let idx2vtxv = &voronoi_info.idx2vtxv;
     let mut site2canmove = vec![false; num_site];
     // get wall between rooms
     for i_site in 0..site2idx.len() - 1 {
-        if voronoi_info.site2idx[i_site + 1] == voronoi_info.site2idx[i_site] { // there is no cell
+        if voronoi_info.site2idx[i_site + 1] == voronoi_info.site2idx[i_site] {
+            // there is no cell
             continue;
         }
         let i_room = site2room[i_site];
@@ -548,21 +639,20 @@ pub fn loss_lloyd_internal(
         }
     }
     // dbg!(&site2canmove);
-    let mask: Vec<f32> = site2canmove.iter().flat_map(|v| if *v {[0f32, 0f32] }else {[1f32, 1f32]}).collect();
-    let mask = candle_core::Tensor::from_vec(
-        mask,
-        (num_site, 2),
-        &candle_core::Device::Cpu)?;
+    let mask: Vec<f32> = site2canmove
+        .iter()
+        .flat_map(|v| if *v { [0f32, 0f32] } else { [1f32, 1f32] })
+        .collect();
+    let mask = candle_core::Tensor::from_vec(mask, (num_site, 2), &candle_core::Device::Cpu)?;
     let polygonmesh2_to_cogs = del_candle::polygonmesh2_to_cogs::Layer {
         elem2idx: Vec::from(voronoi_info.site2idx.clone()),
-        idx2vtx: Vec::from(voronoi_info.idx2vtxv.clone())
+        idx2vtx: Vec::from(voronoi_info.idx2vtxv.clone()),
     };
     let site2cogs = vtxv2xy.apply_op1(polygonmesh2_to_cogs)?;
     let diff = site2xy.sub(&site2cogs)?;
     let diffmasked = mask.mul(&diff)?;
     diffmasked.sqr().unwrap().sum_all()
 }
-
 
 pub fn room2area(
     site2room: &[usize],
@@ -577,7 +667,7 @@ pub fn room2area(
     };
     let site2areas = vtxv2xy.apply_op1(polygonmesh2_to_areas)?;
     let site2areas = site2areas.reshape((site2areas.dim(0).unwrap(), 1))?; // change shape to use .mutmul()
-    //
+                                                                           //
     let num_site = site2room.len();
     let sum_sites_for_rooms = {
         let mut sum_sites_for_rooms = vec![0f32; num_site * num_room];
@@ -624,22 +714,59 @@ pub fn remove_site_too_close(site2room: &mut [usize], site2xy: &candle_core::Ten
     }
 }
 
-pub fn site2room(
-    num_site: usize,
-    room2area: &[f32]) -> Vec<usize>
-{
+fn enforce_min_site_distance(coords: &mut [f32], min_distance: f32) {
+    if coords.len() < 4 || min_distance <= 0.0 {
+        return;
+    }
+    let num_site = coords.len() / 2;
+    let mut min_sq = min_distance * min_distance;
+    if !min_sq.is_finite() {
+        return;
+    }
+    min_sq = min_sq.max(0.0);
+    for i in 0..num_site {
+        let i_idx = i * 2;
+        for j in (i + 1)..num_site {
+            let j_idx = j * 2;
+            let mut dx = coords[j_idx] - coords[i_idx];
+            let mut dy = coords[j_idx + 1] - coords[i_idx + 1];
+            let dist_sq = dx * dx + dy * dy;
+            if dist_sq >= min_sq {
+                continue;
+            }
+            let dist = dist_sq.sqrt();
+            if dist <= 1.0e-9 {
+                let angle = ((i + j) as f32 * 12.9898).sin();
+                dx = angle.cos();
+                dy = angle.sin();
+            } else {
+                dx /= dist;
+                dy /= dist;
+            }
+            let push = (min_distance - dist.max(1.0e-9)) * 0.5;
+            coords[i_idx] -= dx * push;
+            coords[i_idx + 1] -= dy * push;
+            coords[j_idx] += dx * push;
+            coords[j_idx + 1] += dy * push;
+        }
+    }
+}
+
+pub fn site2room(num_site: usize, room2area: &[f32]) -> Vec<usize> {
     let num_room = room2area.len();
     let mut site2room: Vec<usize> = vec![usize::MAX; num_site];
     let num_site_assign = num_site - num_room;
     let area: f32 = room2area.iter().sum();
     {
-        let cumsum: Vec<f32> = room2area.iter()
+        let cumsum: Vec<f32> = room2area
+            .iter()
             .scan(0.0, |acc, &x| {
                 *acc += x;
                 Some(*acc)
-            }).collect();
-//        dbg!(&room2area);
-//        dbg!(&cumsum);
+            })
+            .collect();
+        //        dbg!(&room2area);
+        //        dbg!(&cumsum);
         let area_par_site = area / num_site_assign as f32;
         let mut i_site_cur = 0;
         let mut area_cur = 0.;
@@ -697,7 +824,11 @@ fn jitter_overlapping_sites(
     vtxl2xy: &[f32],
 ) -> candle_core::Result<candle_core::Tensor> {
     let coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
-    let num_site = if coords.is_empty() { 0 } else { coords.len() / 2 };
+    let num_site = if coords.is_empty() {
+        0
+    } else {
+        coords.len() / 2
+    };
     let span = boundary_span(vtxl2xy);
     let jitter_step = span * 1.0e-5_f32;
     let tolerance = span * 1.0e-7_f32 + f32::EPSILON;
@@ -744,8 +875,9 @@ fn optimize_iteration(
     site2xy2flag: &candle_core::Var,
     site2room: &[usize],
     room2area_trg: &candle_core::Tensor,
-    room_connections: &Vec<(usize, usize)>,
+    room_connections: &[(usize, usize)],
     optimizer: &mut candle_nn::AdamW,
+    params: &ProjectParams,
 ) -> anyhow::Result<(
     candle_core::Tensor,
     del_candle::voronoi2::VoronoiInfo,
@@ -753,14 +885,13 @@ fn optimize_iteration(
     Vec<usize>,
 )> {
     let (num_rooms, _) = room2area_trg.dims2()?;
-    let params = project_params()?;
     let loss_weights = &params.loss_weights;
     let site2xy_adjusted = jitter_overlapping_sites(site2xy, vtxl2xy)?;
-    let (vtxv2xy, voronoi_info) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-        || del_candle::voronoi2::voronoi(vtxl2xy, &site2xy_adjusted, |i_site| {
+    let (vtxv2xy, voronoi_info) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        del_candle::voronoi2::voronoi(vtxl2xy, &site2xy_adjusted, |i_site| {
             site2room[i_site] != usize::MAX
-        }),
-    ))
+        })
+    }))
     .map_err(|payload| {
         let message = panic_payload_to_string(payload.as_ref());
         let backtrace = Backtrace::force_capture();
@@ -801,108 +932,217 @@ fn optimize_iteration(
         &voronoi_info,
         room_connections,
     )?;
-    let loss_fix = site2xy.sub(site2xy_ini)?.mul(site2xy2flag)?.sqr()?.sum_all()?;
+    let loss_fix = site2xy
+        .sub(site2xy_ini)?
+        .mul(site2xy2flag)?
+        .sqr()?
+        .sum_all()?;
     let loss_lloyd = del_candle::voronoi2::loss_lloyd(
         &voronoi_info.site2idx,
         &voronoi_info.idx2vtxv,
         &site2xy_adjusted,
         &vtxv2xy,
     )?;
-    let loss_each_area = loss_each_area.affine(loss_weights.each_area as f64, 0.0)?.clone();
-    let loss_total_area = loss_total_area.affine(loss_weights.total_area as f64, 0.0)?.clone();
+    let loss_each_area = loss_each_area
+        .affine(loss_weights.each_area as f64, 0.0)?
+        .clone();
+    let loss_total_area = loss_total_area
+        .affine(loss_weights.total_area as f64, 0.0)?
+        .clone();
     let loss_walllen = loss_walllen.affine(loss_weights.wall_length as f64, 0.0)?;
     let loss_topo = loss_topo.affine(loss_weights.topology as f64, 0.0)?;
     let loss_fix = loss_fix.affine(loss_weights.fix as f64, 0.0)?;
     let loss_lloyd = loss_lloyd.affine(loss_weights.lloyd as f64, 0.0)?;
-    let loss = (
-        loss_each_area
-            + loss_total_area
-            + loss_walllen
-            + loss_topo
-            + loss_fix
-            + loss_lloyd
-    )?;
+    let loss =
+        (loss_each_area + loss_total_area + loss_walllen + loss_topo + loss_fix + loss_lloyd)?;
     optimizer.backward_step(&loss)?;
     Ok((site2xy_adjusted, voronoi_info, vtxv2xy, edge2vtxv_wall))
+}
+
+use std::io::Write;
+
+fn optimize_phase(
+    canvas_gif: &mut del_canvas_core::canvas_gif::Canvas,
+    transform_world2pix: &nalgebra::Matrix3<f32>,
+    vtxl2xy: &[f32],
+    site2xy_start: &[f32],
+    site2xy_ini: &candle_core::Tensor,
+    site2xy2flag: &[f32],
+    site2room: &[usize],
+    room2area_trg: &candle_core::Tensor,
+    room_connections: &[(usize, usize)],
+    iter: usize,
+    params: &ProjectParams,
+) -> anyhow::Result<Vec<f32>> {
+    let num_sites = if site2xy_start.is_empty() {
+        0
+    } else {
+        site2xy_start.len() / 2
+    };
+    let device = &candle_core::Device::Cpu;
+    let site2xy = candle_core::Var::from_slice(
+        site2xy_start,
+        candle_core::Shape::from((num_sites, 2)),
+        device,
+    )?;
+    let site2xy2flag = candle_core::Var::from_slice(
+        site2xy2flag,
+        candle_core::Shape::from((num_sites, 2)),
+        device,
+    )?;
+
+    let learning_rates = &params.learning_rates;
+    let mut optimizer = candle_nn::AdamW::new(
+        vec![site2xy.clone()],
+        candle_nn::ParamsAdamW {
+            lr: learning_rates.first as f64,
+            ..Default::default()
+        },
+    )?;
+
+    let phase_timer = Instant::now();
+    let mut persent_last = 0;
+    for iter_idx in 0..iter {
+
+        let persent = ((iter_idx + 1) * 100) / iter;
+        if persent != persent_last {
+            persent_last = persent;
+            print!("{}% ", persent);
+            let mut stdout = std::io::stdout().lock();
+            stdout.flush()?;  
+        }
+
+        if iter_idx == 150 {
+            optimizer.set_params(candle_nn::ParamsAdamW {
+                lr: learning_rates.second as f64,
+                ..Default::default()
+            });
+        } else if iter_idx == 300 {
+            optimizer.set_params(candle_nn::ParamsAdamW {
+                lr: learning_rates.third as f64,
+                ..Default::default()
+            });
+        }
+
+        let (site2xy_adjusted, voronoi_info, vtxv2xy, edge2vtxv_wall) = optimize_iteration(
+            vtxl2xy,
+            &site2xy,
+            site2xy_ini,
+            &site2xy2flag,
+            site2room,
+            room2area_trg,
+            room_connections,
+            &mut optimizer,
+            params,
+        )?;
+
+        // insert maintain the minimum distance between all sites
+        let mut site2xy_render = site2xy_adjusted.flatten_all()?.to_vec1::<f32>()?;
+        let min_site_distance = boundary_span(vtxl2xy) * 1.0e-3_f32;
+        enforce_min_site_distance(&mut site2xy_render, min_site_distance.max(1.0e-6));
+        let vtxv2xy_render = vtxv2xy.flatten_all()?.to_vec1::<f32>()?;
+        canvas_gif.clear(0);
+        crate::my_paint(
+            canvas_gif,
+            transform_world2pix,
+            vtxl2xy,
+            &site2xy_render,
+            &voronoi_info,
+            &vtxv2xy_render,
+            site2room,
+            &edge2vtxv_wall,
+        );
+        canvas_gif.write();
+    }
+
+    println!("Phase elapsed: {:.2?}", phase_timer.elapsed());
+    let final_coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
+    Ok(final_coords)
 }
 
 fn optimize_impl(
     canvas_gif: &mut del_canvas_core::canvas_gif::Canvas,
     vtxl2xy: Vec<f32>,
-    site2xy: Vec<f32>,
+    mut site2xy: Vec<f32>,
     site2room: Vec<usize>,
     site2xy2flag: Vec<f32>,
     room2area_trg: Vec<f32>,
-    _room2color: Vec<i32>,
+    room2color: Vec<i32>,
     room_connections: Vec<(usize, usize)>,
-    iter: usize) -> anyhow::Result<()>
-{
-
+    iter: usize,
+    params_index: usize,
+) -> anyhow::Result<()> {
+    let canvas_width = canvas_gif.width;
+    let canvas_height = canvas_gif.height;
     let transform_world2pix = nalgebra::Matrix3::<f32>::new(
-        canvas_gif.width as f32 * 0.8,
+        canvas_width as f32 * 0.8,
         0.,
-        canvas_gif.width as f32 * 0.1,
+        canvas_width as f32 * 0.1,
         0.,
-        -(canvas_gif.height as f32) * 0.8,
-        canvas_gif.height as f32 * 0.9,
+        -(canvas_height as f32) * 0.8,
+        canvas_height as f32 * 0.9,
         0.,
         0.,
         1.,
     );
-    // ---------------------
-    // candle from here
-    let site2xy = candle_core::Var::from_slice(
-        &site2xy,
+    let mut palette = vec![0xFFFFFF, 0x000000];
+    palette.extend(room2color.iter().copied());
+
+    //dbg!( canvas_gif.path );
+
+    if site2xy.len() != site2xy2flag.len() {
+        anyhow::bail!(
+            "site2xy ({}) and site2xy2flag ({}) must have the same length",
+            site2xy.len(),
+            site2xy2flag.len()
+        );
+    }
+    if site2xy.len() / 2 != site2room.len() {
+        anyhow::bail!(
+            "site2room ({}) must match number of sites ({})",
+            site2room.len(),
+            site2xy.len() / 2
+        );
+    }
+
+    let num_rooms = room2area_trg.len();
+    let room2area_trg = candle_core::Tensor::from_vec(
+        room2area_trg,
+        candle_core::Shape::from((num_rooms, 1)),
+        &candle_core::Device::Cpu,
+    )?;
+
+    let site2xy_ini = candle_core::Tensor::from_vec(
+        site2xy.clone(),
         candle_core::Shape::from((site2xy.len() / 2, 2)),
         &candle_core::Device::Cpu,
-    ).unwrap();
-    let site2xy2flag = candle_core::Var::from_slice(
-        &site2xy2flag,
-        candle_core::Shape::from((site2xy2flag.len() / 2, 2)),
-        &candle_core::Device::Cpu,
-    ).unwrap();
-    let site2xy_ini = candle_core::Tensor::from_vec(
-        site2xy.flatten_all().unwrap().to_vec1::<f32>()?,
-        candle_core::Shape::from((site2xy.dims2()?.0, 2)),
-        &candle_core::Device::Cpu,
-    ).unwrap();
-    assert_eq!(site2room.len(), site2xy.dims2()?.0);
-    //
-    let room2area_trg = {
-        let num_room = room2area_trg.len();
-        candle_core::Tensor::from_vec(
-            room2area_trg,
-            candle_core::Shape::from((num_room, 1)),
-            &candle_core::Device::Cpu,
-        )
-            .unwrap()
-    };
-    let params = project_params()?;
-    let learning_rates = &params.learning_rates;
-    let adamw_params = candle_nn::ParamsAdamW {
-        lr: learning_rates.first as f64,
-        ..Default::default()
-    };
-    use std::time::Instant;
-    dbg!(site2room.len());
-    let now = Instant::now();
-    let mut optimizer = candle_nn::AdamW::new(vec![site2xy.clone()], adamw_params)?;
-    for iter_idx in 0..iter {
-        if iter_idx == 150 {
-            let adamw_params = candle_nn::ParamsAdamW {
-                lr: learning_rates.second as f64,
-                ..Default::default()
-            };
-            optimizer.set_params(adamw_params);
-        }
-        if iter_idx == 300 {
-            let adamw_params = candle_nn::ParamsAdamW {
-                lr: learning_rates.third as f64,
-                ..Default::default()
-            };
-            optimizer.set_params(adamw_params);
-        }
-        let (site2xy_adjusted, voronoi_info, vtxv2xy, edge2vtxv_wall) = optimize_iteration(
+    )?;
+
+    let params_all = project_params_all();
+    if params_index >= params_all.len() {
+        anyhow::bail!(
+            "project parameters index {} out of range ({} files detected)",
+            params_index,
+            params_all.len()
+        );
+    }
+
+    let total_timer = Instant::now();
+    for (phase_offset, params) in params_all[params_index..].iter().enumerate() {
+        println!(
+            "=== Starting phase {} (params index {}) ===",
+            phase_offset,
+            params_index + phase_offset
+        );
+        let phase_filename = format!("result{phase:02}.gif", phase = phase_offset);
+        let mut phase_canvas = del_canvas_core::canvas_gif::Canvas::new(
+            &phase_filename,
+            (canvas_width, canvas_height),
+            &palette,
+        );
+        site2xy = optimize_phase(
+            &mut phase_canvas,
+            &transform_world2pix,
             &vtxl2xy,
             &site2xy,
             &site2xy_ini,
@@ -910,27 +1150,12 @@ fn optimize_impl(
             &site2room,
             &room2area_trg,
             &room_connections,
-            &mut optimizer,
+            iter,
+            params,
         )?;
-
-        let site2xy_render = site2xy_adjusted.flatten_all()?.to_vec1::<f32>()?;
-        let vtxv2xy_render = vtxv2xy.flatten_all()?.to_vec1::<f32>()?;
-        canvas_gif.clear(0);
-        crate::my_paint(
-            canvas_gif,
-            &transform_world2pix,
-            &vtxl2xy,
-            &site2xy_render,
-            &voronoi_info,
-            &vtxv2xy_render,
-            &site2room,
-            &edge2vtxv_wall,
-        );
-        canvas_gif.write();
     }
 
-    let elapsed = now.elapsed();
-    println!("Elapsed: {:.2?}", elapsed);
+    println!("Total optimization elapsed: {:.2?}", total_timer.elapsed());
     Ok(())
 }
 
@@ -944,6 +1169,7 @@ pub fn optimize(
     room2color: Vec<i32>,
     room_connections: Vec<(usize, usize)>,
     iter: usize,
+    params_index: usize,
 ) -> anyhow::Result<()> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         optimize_impl(
@@ -956,6 +1182,7 @@ pub fn optimize(
             room2color,
             room_connections,
             iter,
+            params_index,
         )
     }));
     match result {
@@ -963,7 +1190,9 @@ pub fn optimize(
         Err(payload) => {
             let message = panic_payload_to_string(payload.as_ref());
             let backtrace = Backtrace::force_capture();
-            Err(anyhow::anyhow!("optimize panicked: {message}\nBacktrace:\n{backtrace}"))
+            Err(anyhow::anyhow!(
+                "optimize panicked: {message}\nBacktrace:\n{backtrace}"
+            ))
         }
     }
 }
@@ -989,4 +1218,3 @@ use pyo3::prelude::*;
 fn floorplan(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     python_bindings::register(py, m)
 }
-

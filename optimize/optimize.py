@@ -63,19 +63,45 @@ class OptimizeParams:
 	learning_rates: LearningRates = field(default_factory=LearningRates)
 
 
-class SiteAdjustmentNet(torch.nn.Module):
-	"""Two-layer perceptron that predicts coordinate offsets."""
 
-	def __init__(self, num_coords: int, hidden_dim: int = 512) -> None:
+class SiteAdjustmentNet(torch.nn.Module):
+	"""Multi-layer perceptron that predicts coordinate offsets."""
+
+	def __init__(
+		self,
+		num_coords: int,
+		hidden_dim: int = 512,
+		num_layers: int = 8,
+		output_scale: float = 0.1,
+	) -> None:
 		super().__init__()
-		self.fc1 = torch.nn.Linear(num_coords, hidden_dim)
-		self.fc2 = torch.nn.Linear(hidden_dim, num_coords)
+		if num_layers < 2:
+			raise ValueError("num_layers must be at least 2")
+		layers: List[torch.nn.Linear] = []
+		layers.append(torch.nn.Linear(num_coords, hidden_dim))
+		for _ in range(num_layers - 2):
+			layers.append(torch.nn.Linear(hidden_dim, hidden_dim))
+		layers.append(torch.nn.Linear(hidden_dim, num_coords))
+		self.layers = torch.nn.ModuleList(layers)
 		self.activation = torch.nn.GELU()
+		self.output_scale = output_scale
+		self._reset_parameters()
+
+	def _reset_parameters(self) -> None:
+		for idx, layer in enumerate(self.layers):
+			if idx == len(self.layers) - 1:
+				torch.nn.init.zeros_(layer.weight)
+				torch.nn.init.zeros_(layer.bias)
+			else:
+				torch.nn.init.xavier_uniform_(layer.weight, gain=math.sqrt(2.0))
+				torch.nn.init.zeros_(layer.bias)
 
 	def forward(self, coords: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-		hidden = self.activation(self.fc1(coords))
-		delta = self.fc2(hidden)
-		return coords + delta
+		hidden = coords
+		for layer in self.layers[:-1]:
+			hidden = self.activation(layer(hidden))
+		delta = self.layers[-1](hidden)
+		return coords + delta * self.output_scale
 
 
 @dataclass(frozen=True)
@@ -206,6 +232,8 @@ def optimize(
 	grad_method: str = "central",
 	spsa_samples: int = 2,
 	nn_hidden: int = 512,
+	nn_layers: int = 8,
+	nn_scale: float = 0.1,
 ) -> List[float]:
 	"""Train a two-layer network that maps initial sites to adjusted coordinates."""
 
@@ -229,7 +257,12 @@ def optimize(
 		bounds=_polygon_bounds(vtxl2xy),
 	)
 
-	model = SiteAdjustmentNet(input_tensor.numel(), hidden_dim=nn_hidden).to(device)
+	model = SiteAdjustmentNet(
+		input_tensor.numel(),
+		hidden_dim=nn_hidden,
+		num_layers=nn_layers,
+		output_scale=nn_scale,
+	).to(device)
 	method = grad_method.lower()
 	if method not in {"forward", "central", "spsa"}:
 		raise ValueError("grad_method must be one of 'forward', 'central', or 'spsa'.")
@@ -247,7 +280,11 @@ def optimize(
 				group["lr"] = lr_schedule[iter_idx]
 
 		optimizer.zero_grad(set_to_none=True)
+  
+		print( f"predict iter_idx: {iter_idx}" )  # Debug print to trace iteration index
 		pred_flat = model(input_tensor).reshape(-1, 2)
+  
+		# print( f"predict pred_flat: {pred_flat}" )  # Debug print to trace predicted flat tensor
 		loss = _FloorplanLossFunction.apply(
 			pred_flat,
 			ctx,
@@ -256,7 +293,11 @@ def optimize(
 			grad_epsilon,
 			max(1, spsa_samples),
 		)
+  
+		# print( f"predict loss: {loss.item()}" )  # Debug print to trace loss value
 		loss.backward()
+  
+		# print( f"predict grad: {pred_flat.grad}" )  # Debug print to trace gradient
 		optimizer.step()
 
 		with torch.no_grad():

@@ -64,11 +64,10 @@ impl PyVoronoiInfo {
             ));
         }
         let site2xy_var = var_from_vec(site2xy, num_site, 2)?;
-        let (vtxv2xy_tensor, voronoi_info) = del_candle::voronoi2::voronoi(
-            &vtxl2xy,
-            &site2xy_var,
-            |i_site| site2room[i_site] != usize::MAX,
-        );
+        let (vtxv2xy_tensor, voronoi_info) =
+            del_candle::voronoi2::voronoi(&vtxl2xy, &site2xy_var, |i_site| {
+                site2room[i_site] != usize::MAX
+            });
         let vtxv2xy = tensor_to_vec(vtxv2xy_tensor)?;
         Ok(Self {
             inner: voronoi_info,
@@ -191,7 +190,9 @@ fn py_poisson_disk_sampling(
     seed: Option<u64>,
 ) -> PyResult<Vec<f32>> {
     if polygon.len() < 3 {
-        return Err(PyValueError::new_err("polygon must contain at least 3 points"));
+        return Err(PyValueError::new_err(
+            "polygon must contain at least 3 points",
+        ));
     }
     if radius <= 0.0 {
         return Err(PyValueError::new_err("radius must be positive"));
@@ -218,13 +219,9 @@ fn py_loss_lloyd_internal(
     let vertex_data = vtxv2xy.unwrap_or_else(|| voronoi_info.default_vtxv2xy());
     let num_vertex = num_vertex.unwrap_or_else(|| vertex_data.len() / 2);
     let vtx_tensor = tensor_from_vec(vertex_data, num_vertex, 2)?;
-    let loss = crate::loss_lloyd_internal(
-        voronoi_info.as_ref(),
-        &site2room,
-        &site2xy_var,
-        &vtx_tensor,
-    )
-    .map_err(candle_err)?;
+    let loss =
+        crate::loss_lloyd_internal(voronoi_info.as_ref(), &site2room, &site2xy_var, &vtx_tensor)
+            .map_err(candle_err)?;
     tensor_to_scalar(loss)
 }
 
@@ -252,7 +249,11 @@ fn py_room2area(
 }
 
 #[pyfunction(name = "remove_site_too_close")]
-fn py_remove_site_too_close(site2room: Vec<usize>, site2xy: Vec<f32>, num_site: usize) -> PyResult<Vec<usize>> {
+fn py_remove_site_too_close(
+    site2room: Vec<usize>,
+    site2xy: Vec<f32>,
+    num_site: usize,
+) -> PyResult<Vec<usize>> {
     let mut site2room = site2room;
     let site2xy_tensor = tensor_from_vec(site2xy, num_site, 2)?;
     crate::remove_site_too_close(&mut site2room, &site2xy_tensor);
@@ -275,6 +276,7 @@ fn py_optimize(
     room2color: Vec<i32>,
     room_connections: Vec<(usize, usize)>,
     iter: usize,
+    params_index: Option<usize>,
 ) -> PyResult<()> {
     let mut canvas_ref = canvas.borrow_mut();
     crate::optimize(
@@ -287,6 +289,7 @@ fn py_optimize(
         room2color,
         room_connections,
         iter,
+        params_index.unwrap_or(0),
     )
     .map_err(anyhow_err)
 }
@@ -340,7 +343,9 @@ fn py_loss_topo_kmean_style(
 
 fn matrix3_from_vec(values: &[f32]) -> PyResult<Matrix3<f32>> {
     if values.len() != 9 {
-        return Err(PyValueError::new_err("transform matrix must contain 9 values"));
+        return Err(PyValueError::new_err(
+            "transform matrix must contain 9 values",
+        ));
     }
     Ok(Matrix3::from_row_slice(values))
 }
