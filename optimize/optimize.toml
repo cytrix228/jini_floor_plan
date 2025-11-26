@@ -1,5 +1,5 @@
 [duck_example]
-iterations = 500
+iterations = 200
 render_interval = 1
 seed = 0
 loop_samples = 400

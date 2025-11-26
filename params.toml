@@ -7,6 +7,6 @@ fix = 100.0
 lloyd = 0.5
 
 [learning_rates]
-first = 0.02
-second = 0.002
-third = 0.0002
+first = 0.05
+second = 0.005
+third = 0.0005

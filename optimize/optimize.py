@@ -6,10 +6,10 @@ evaluations to the existing Rust bindings exposed via the ``floorplan`` module.
 
 Notes
 -----
-* The Rust losses do not expose autograd information, so we approximate the
-  gradient numerically (forward finite differences). PyTorch is used for tensor
-  storage plus the AdamW optimizer, while the heavy geometric computations stay
-  in Rust for fidelity.
+* The Rust losses do not expose autograd information, so we wrap them in a
+	custom ``torch.autograd.Function`` that reuses our finite-difference/SPSA
+	gradients. This lets a small neural network learn to adjust the coordinates
+	using PyTorch's standard backpropagation machinery.
 * All loss weights and learning-rate stages are loaded from ``params.toml`` so
   they match the Rust build.
 * The implementation keeps parity with the Rust optimizer, including jittering
@@ -20,12 +20,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import warnings
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import math
 import torch
 
 import floorplan as fp
+
+try:  # pragma: no cover - optional dependency provided by pyo3 bindings
+	from pyo3_runtime import PanicException  # type: ignore
+except Exception:  # pragma: no cover
+	class PanicException(RuntimeError):
+		pass
 
 try:  # Python 3.11+
 	import tomllib
@@ -56,6 +63,21 @@ class OptimizeParams:
 	learning_rates: LearningRates = field(default_factory=LearningRates)
 
 
+class SiteAdjustmentNet(torch.nn.Module):
+	"""Two-layer perceptron that predicts coordinate offsets."""
+
+	def __init__(self, num_coords: int, hidden_dim: int = 512) -> None:
+		super().__init__()
+		self.fc1 = torch.nn.Linear(num_coords, hidden_dim)
+		self.fc2 = torch.nn.Linear(hidden_dim, num_coords)
+		self.activation = torch.nn.GELU()
+
+	def forward(self, coords: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+		hidden = self.activation(self.fc1(coords))
+		delta = self.fc2(hidden)
+		return coords + delta
+
+
 @dataclass(frozen=True)
 class OptimizationContext:
 	vtxl2xy: List[float]
@@ -66,6 +88,7 @@ class OptimizationContext:
 	room_connections: List[Tuple[int, int]]
 	room2color: List[int]
 	total_area_target: float
+	bounds: Tuple[float, float, float, float]
 
 	@property
 	def num_rooms(self) -> int:
@@ -104,6 +127,69 @@ def load_params(path: Optional[Path] = None) -> OptimizeParams:
 	return OptimizeParams(loss_weights=loss_weights, learning_rates=learning_rates)
 
 
+class _FloorplanLossFunction(torch.autograd.Function):
+	"""Custom autograd bridge to the Rust loss stack."""
+
+	@staticmethod
+	def forward(
+		ctx,
+		site_tensor: torch.Tensor,
+		opt_ctx: OptimizationContext,
+		params: OptimizeParams,
+		grad_method: str,
+		eps: float,
+		spsa_samples: int,
+	):
+		clamped = _clamp_tensor(site_tensor, opt_ctx.bounds)
+		loss, _ = _evaluate_loss(clamped, opt_ctx, params, need_details=False)
+		ctx.save_for_backward(clamped.detach())
+		ctx.opt_ctx = opt_ctx
+		ctx.params = params
+		ctx.grad_method = grad_method
+		ctx.eps = eps
+		ctx.spsa_samples = max(1, int(spsa_samples))
+		ctx.base_loss = loss
+		return site_tensor.new_tensor(loss)
+
+	@staticmethod
+	def backward(ctx, grad_output):
+		(site_snapshot,) = ctx.saved_tensors
+		method = ctx.grad_method
+		try:
+			if method == "forward":
+				grad = _forward_difference_grad(
+					site_snapshot,
+					ctx.opt_ctx,
+					ctx.params,
+					ctx.base_loss,
+					ctx.eps,
+				)
+			elif method == "central":
+				grad = _central_difference_grad(site_snapshot, ctx.opt_ctx, ctx.params, ctx.eps)
+			elif method == "spsa":
+				grad = _spsa_gradient(
+					site_snapshot,
+					ctx.opt_ctx,
+					ctx.params,
+					ctx.eps,
+					ctx.spsa_samples,
+				)
+			else:  # pragma: no cover - validated upstream
+				raise ValueError(f"Unknown grad_method '{method}'.")
+		except (RuntimeError, PanicException) as exc:  # pragma: no cover - defensive fallback
+			message = str(exc)
+			if "Voronoi" in message:
+				warnings.warn(
+					"Voronoi panic during gradient estimation; using zero gradient for this step",
+					RuntimeWarning,
+				)
+				grad = torch.zeros_like(site_snapshot)
+			else:
+				raise
+		grad_factor = 1.0 if grad_output is None else grad_output
+		return grad_factor * grad, None, None, None, None, None
+
+
 def optimize(
 	vtxl2xy: Sequence[float],
 	site2xy: Sequence[float],
@@ -115,12 +201,13 @@ def optimize(
 	iterations: int,
 	canvas: Optional[fp.CanvasGif] = None,
 	render_interval: int = 1,
-	grad_epsilon: float = 1.0e-3,
+	grad_epsilon: float = 2.5e-4,
 	params: Optional[OptimizeParams] = None,
-	grad_method: str = "spsa",
+	grad_method: str = "central",
 	spsa_samples: int = 2,
+	nn_hidden: int = 512,
 ) -> List[float]:
-	"""Run the PyTorch optimizer and return the final flattened coordinates."""
+	"""Train a two-layer network that maps initial sites to adjusted coordinates."""
 
 	if params is None:
 		params = load_params()
@@ -128,10 +215,8 @@ def optimize(
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 	if device.type == "cuda":
 		print("[optimize] Using CUDA device for tensor ops")
-	site_tensor = torch.nn.Parameter(
-		torch.tensor(site2xy, dtype=torch.float32, device=device).reshape(-1, 2)
-	)
-	site2xy_ini = site_tensor.detach().to("cpu").clone().reshape(-1).tolist()
+	input_tensor = torch.tensor(site2xy, dtype=torch.float32, device=device).reshape(1, -1)
+	site2xy_ini = input_tensor.detach().to("cpu").clone().reshape(-1).tolist()
 	ctx = OptimizationContext(
 		vtxl2xy=list(vtxl2xy),
 		site2room=[int(v) for v in site2room],
@@ -141,16 +226,19 @@ def optimize(
 		room_connections=[(int(a), int(b)) for (a, b) in room_connections],
 		room2color=list(room2color),
 		total_area_target=_polygon_area(vtxl2xy),
+		bounds=_polygon_bounds(vtxl2xy),
 	)
 
-	lr_scale = 0.25 if grad_method.lower() != "finite_difference" else 1.0
-	optimizer = torch.optim.AdamW(
-		[site_tensor], lr=params.learning_rates.first * lr_scale
-	)
+	model = SiteAdjustmentNet(input_tensor.numel(), hidden_dim=nn_hidden).to(device)
+	method = grad_method.lower()
+	if method not in {"forward", "central", "spsa"}:
+		raise ValueError("grad_method must be one of 'forward', 'central', or 'spsa'.")
+	optimizer = torch.optim.Adam(model.parameters(), lr=params.learning_rates.first)
 	lr_schedule = {
-		150: params.learning_rates.second * lr_scale,
-		300: params.learning_rates.third * lr_scale,
+		150: params.learning_rates.second,
+		300: params.learning_rates.third,
 	}
+	model.train()
 
 	for iter_idx in range(iterations):
 		need_render = canvas is not None and (iter_idx % render_interval == 0)
@@ -158,21 +246,23 @@ def optimize(
 			for group in optimizer.param_groups:
 				group["lr"] = lr_schedule[iter_idx]
 
-		total_loss, payload = _evaluate_loss(site_tensor, ctx, params, need_details=need_render)
-		if grad_method.lower() == "finite_difference":
-			grad = _finite_difference_grad(site_tensor, ctx, params, total_loss, grad_epsilon)
-		else:
-			grad = _spsa_gradient(
-				site_tensor,
-				ctx,
-				params,
-				grad_epsilon,
-				spsa_samples=max(1, spsa_samples),
-			)
-		site_tensor.grad = grad
-		optimizer.step()
 		optimizer.zero_grad(set_to_none=True)
+		pred_flat = model(input_tensor).reshape(-1, 2)
+		loss = _FloorplanLossFunction.apply(
+			pred_flat,
+			ctx,
+			params,
+			method,
+			grad_epsilon,
+			max(1, spsa_samples),
+		)
+		loss.backward()
+		optimizer.step()
 
+		with torch.no_grad():
+			current_sites = model(input_tensor).reshape(-1, 2)
+			current_sites = _clamp_tensor(current_sites, ctx.bounds)
+			total_loss, payload = _evaluate_loss(current_sites, ctx, params, need_details=need_render)
 		metrics = payload["metrics"]
 		print(
 			f"iter={iter_idx:04d} loss={total_loss:.6f} "
@@ -182,11 +272,13 @@ def optimize(
 		)
 
 		if need_render and canvas is not None:
-			# Recompute loss to capture the post-update geometry for visualization.
-			_, render_payload = _evaluate_loss(site_tensor, ctx, params, need_details=True)
-			_render(canvas, ctx, render_payload)
+			_render(canvas, ctx, payload)
 
-	return site_tensor.detach().reshape(-1).tolist()
+	model.eval()
+	with torch.no_grad():
+		final_sites = model(input_tensor).reshape(-1, 2)
+		final_sites = _clamp_tensor(final_sites, ctx.bounds)
+	return final_sites.detach().reshape(-1).tolist()
 
 
 @torch.no_grad()
@@ -198,8 +290,14 @@ def _evaluate_loss(
 	need_details: bool,
 ) -> Tuple[float, Dict[str, object]]:
 	flat_coords = site_tensor.detach().to("cpu").reshape(-1).tolist()
+	flat_coords = _clamp_coord_list(flat_coords, ctx.bounds)
 	adjusted = _jitter_overlapping_sites(flat_coords, ctx.vtxl2xy)
-	voronoi = fp.VoronoiInfo(ctx.vtxl2xy, adjusted, ctx.site2room)
+	try:
+		voronoi = fp.VoronoiInfo(ctx.vtxl2xy, adjusted, ctx.site2room)
+	except PanicException as exc:  # pragma: no cover
+		raise RuntimeError(
+			"Voronoi builder panicked; try reducing grad_epsilon or ensuring sites stay within bounds"
+		) from exc
 	vtxv2xy = voronoi.vtx_coordinates()
 	room2area = fp.room2area(ctx.site2room, ctx.num_rooms, voronoi)
 	loss_each_area = _sum_squared(room2area, ctx.room2area_trg)
@@ -257,7 +355,7 @@ def _evaluate_loss(
 
 
 @torch.no_grad()
-def _finite_difference_grad(
+def _forward_difference_grad(
 	site_tensor: torch.Tensor,
 	ctx: OptimizationContext,
 	params: OptimizeParams,
@@ -275,6 +373,31 @@ def _finite_difference_grad(
 			perturbed.reshape_as(site_tensor), ctx, params, need_details=False
 		)
 		flat_grad[idx] = (loss_pos - base_loss) / eps
+	return grad
+
+
+@torch.no_grad()
+def _central_difference_grad(
+	site_tensor: torch.Tensor,
+	ctx: OptimizationContext,
+	params: OptimizeParams,
+	eps: float,
+) -> torch.Tensor:
+	grad = torch.zeros_like(site_tensor.detach())
+	flat_grad = grad.reshape(-1)
+	base = site_tensor.detach()
+	total_elems = flat_grad.numel()
+	for idx in range(total_elems):
+		perturbed = base.clone().reshape(-1)
+		perturbed[idx] += eps
+		loss_pos, _ = _evaluate_loss(
+			perturbed.reshape_as(site_tensor), ctx, params, need_details=False
+		)
+		perturbed[idx] -= 2 * eps
+		loss_neg, _ = _evaluate_loss(
+			perturbed.reshape_as(site_tensor), ctx, params, need_details=False
+		)
+		flat_grad[idx] = (loss_pos - loss_neg) / (2.0 * eps)
 	return grad
 
 
@@ -322,6 +445,48 @@ def _polygon_area(loop: Sequence[float]) -> float:
 	return abs(area) * 0.5
 
 
+def _polygon_bounds(loop: Sequence[float]) -> Tuple[float, float, float, float]:
+	if len(loop) < 4:
+		return (0.0, 1.0, 0.0, 1.0)
+	xs = loop[0::2]
+	ys = loop[1::2]
+	min_x = min(xs)
+	max_x = max(xs)
+	min_y = min(ys)
+	max_y = max(ys)
+	if math.isclose(min_x, max_x):
+		max_x = min_x + 1.0
+	if math.isclose(min_y, max_y):
+		max_y = min_y + 1.0
+	return (min_x, max_x, min_y, max_y)
+
+
+def _clamp_coord_list(coords: Sequence[float], bounds: Tuple[float, float, float, float]) -> List[float]:
+	min_x, max_x, min_y, max_y = bounds
+	clamped = list(coords)
+	for idx in range(0, len(clamped), 2):
+		x = clamped[idx]
+		y = clamped[idx + 1]
+		clamped[idx] = min(max(x, min_x), max_x)
+		clamped[idx + 1] = min(max(y, min_y), max_y)
+	return clamped
+
+
+def _clamp_tensor(tensor: torch.Tensor, bounds: Tuple[float, float, float, float]) -> torch.Tensor:
+	min_x, max_x, min_y, max_y = bounds
+	clamped = tensor.clone()
+	clamped[..., 0] = torch.clamp(clamped[..., 0], min_x, max_x)
+	clamped[..., 1] = torch.clamp(clamped[..., 1], min_y, max_y)
+	return clamped
+
+
+def _clamp_tensor_inplace(tensor: torch.Tensor, bounds: Tuple[float, float, float, float]) -> None:
+	min_x, max_x, min_y, max_y = bounds
+	with torch.no_grad():
+		tensor[..., 0].clamp_(min_x, max_x)
+		tensor[..., 1].clamp_(min_y, max_y)
+
+
 def _boundary_span(loop: Sequence[float]) -> float:
 	xs = loop[0::2]
 	ys = loop[1::2]
@@ -333,6 +498,8 @@ def _jitter_overlapping_sites(coords: List[float], vtxl2xy: Sequence[float]) -> 
 	jitter_step = span * 1.0e-5
 	tolerance = span * 1.0e-7 + 1.0e-9
 	num_site = len(coords) // 2
+	if num_site < 2 or jitter_step == 0.0:
+		return list(coords)
 	delta = [0.0] * len(coords)
 	offsets = [
 		(1.0, 0.0),
@@ -344,20 +511,22 @@ def _jitter_overlapping_sites(coords: List[float], vtxl2xy: Sequence[float]) -> 
 		(1.0, -1.0),
 		(-1.0, 1.0),
 	]
+	quantize = 0.0 if tolerance == 0.0 else 1.0 / tolerance
+	seen: Dict[Tuple[int, int], int] = {}
 	for i in range(num_site):
 		xi = coords[2 * i]
 		yi = coords[2 * i + 1]
-		duplicates = 0
-		for j in range(i):
-			xj = coords[2 * j] + delta[2 * j]
-			yj = coords[2 * j + 1] + delta[2 * j + 1]
-			if abs(xi - xj) <= tolerance and abs(yi - yj) <= tolerance:
-				duplicates += 1
+		if quantize == 0.0:
+			key = (int(xi * 1e9), int(yi * 1e9))
+		else:
+			key = (int(round(xi * quantize)), int(round(yi * quantize)))
+		duplicates = seen.get(key, 0)
 		if duplicates > 0:
 			dirx, diry = offsets[(duplicates - 1) % len(offsets)]
 			shift = jitter_step * duplicates
 			delta[2 * i] += shift * dirx
 			delta[2 * i + 1] += shift * diry
+		seen[key] = duplicates + 1
 	return [c + d for c, d in zip(coords, delta)]
 
 

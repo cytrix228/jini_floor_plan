@@ -187,7 +187,7 @@ def main(config: Dict[str, Any] | None = None) -> None:
     resample_target = int(config["resample_target"])
     poisson_radius = float(config["poisson_radius"])
     poisson_k = int(config["poisson_k"])
-    grad_method = str(config.get("grad_method", "finite_difference"))
+    grad_method = str(config.get("grad_method", "central"))
     spsa_samples = int(config.get("spsa_samples", 2))
     grad_epsilon = float(config.get("grad_epsilon", 1.0e-3))
     write_duck_path_svg(Path("duck_path.svg"))
@@ -237,9 +237,9 @@ def load_optimize_config() -> Dict[str, Any]:
         "resample_target": 100,
         "poisson_radius": 0.03,
         "poisson_k": 50,
-        "grad_method": "finite_difference",
+        "grad_method": "central",
         "spsa_samples": 2,
-        "grad_epsilon": 1.0e-3,
+        "grad_epsilon": 2.5e-4,
     }
     config_path = Path(__file__).resolve().parents[1] / "optimize" / "optimize.toml"
     if not config_path.exists():
