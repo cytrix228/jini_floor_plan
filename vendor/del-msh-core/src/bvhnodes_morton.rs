@@ -1,3 +1,10 @@
+//! computing BVH using the Linear BVH method (i.e., binary tree based on the Morton code)
+//!  * `bvhnodes` - array of index
+//!
+//!  when the number of query object is N, `bvhnodes` is sized as (2N-1)*3
+//!  bvhnodes store the `parent node`, `left node` and `right node` index
+//!  if `right node` index is the maximum numbe, the left node stores the index of an object
+
 use num_traits::AsPrimitive;
 
 fn expand_bits2(x: u32) -> u32 {
@@ -31,13 +38,16 @@ fn test_morton_code2() {
     assert_eq!(morton_code2(0., 1.), 0b01010101010101010101);
 }
 
-pub fn sorted_morten_code2(
-    idx2vtx: &mut [usize],
+pub fn sorted_morten_code2<Index>(
+    idx2vtx: &mut [Index],
     idx2morton: &mut [u32],
     vtx2morton: &mut [u32],
     vtx2xy: &[f32],
     transform_xy2uni: &[f32; 9],
-) {
+) where
+    Index: num_traits::PrimInt + 'static + AsPrimitive<usize>,
+    usize: AsPrimitive<Index>,
+{
     assert_eq!(idx2vtx.len(), idx2morton.len());
     assert_eq!(idx2vtx.len(), vtx2morton.len());
     assert_eq!(idx2vtx.len(), vtx2xy.len() / 2);
@@ -45,17 +55,20 @@ pub fn sorted_morten_code2(
         .chunks(2)
         .zip(vtx2morton.iter_mut())
         .for_each(|(xy, m)| {
-            let xy = del_geo_core::mat3_col_major::transform_homogeneous(transform_xy2uni, &[xy[0], xy[1]])
-                .unwrap();
+            let xy = del_geo_core::mat3_col_major::transform_homogeneous(
+                transform_xy2uni,
+                &[xy[0], xy[1]],
+            )
+            .unwrap();
             *m = morton_code2(xy[0], xy[1]);
         });
     idx2vtx
         .iter_mut()
         .enumerate()
-        .for_each(|(iv, idx)| *idx = iv);
-    idx2vtx.sort_by_key(|iv| vtx2morton[*iv]);
+        .for_each(|(iv, idx)| *idx = iv.as_());
+    idx2vtx.sort_by_key(|iv| vtx2morton[(*iv).as_()]);
     for idx in 0..idx2vtx.len() {
-        idx2morton[idx] = vtx2morton[idx2vtx[idx]];
+        idx2morton[idx] = vtx2morton[idx2vtx[idx].as_()];
     }
 }
 
@@ -105,13 +118,16 @@ fn test_morton_code3() {
 // above: 3D related
 // --------------------
 
-pub fn sorted_morten_code3(
-    idx2vtx: &mut [usize],
+pub fn sorted_morten_code3<Index>(
+    idx2vtx: &mut [Index],
     idx2morton: &mut [u32],
     vtx2morton: &mut [u32],
     vtx2xyz: &[f32],
     transform_xy2uni: &[f32; 16],
-) {
+) where
+    Index: num_traits::PrimInt + 'static + AsPrimitive<usize>,
+    usize: AsPrimitive<Index>,
+{
     assert_eq!(idx2vtx.len(), idx2morton.len());
     assert_eq!(idx2vtx.len(), vtx2morton.len());
     assert_eq!(idx2vtx.len(), vtx2xyz.len() / 3);
@@ -129,10 +145,10 @@ pub fn sorted_morten_code3(
     idx2vtx
         .iter_mut()
         .enumerate()
-        .for_each(|(iv, idx)| *idx = iv);
-    idx2vtx.sort_by_key(|iv| vtx2morton[*iv]);
+        .for_each(|(iv, idx)| *idx = iv.as_());
+    idx2vtx.sort_by_key(|iv| vtx2morton[(*iv).as_()]);
     for idx in 0..idx2vtx.len() {
-        idx2morton[idx] = vtx2morton[idx2vtx[idx]];
+        idx2morton[idx] = vtx2morton[idx2vtx[idx].as_()];
     }
 }
 
@@ -148,7 +164,7 @@ fn test_sorted_morten_code() {
         &mut idx2morton,
         &mut vtx2morton,
         &vtx2xyz,
-        &del_geo_core::mat4_col_major::identity(),
+        &del_geo_core::mat4_col_major::from_identity(),
     );
     for idx in 0..num_vtx - 1 {
         let jdx = idx + 1;
@@ -177,14 +193,14 @@ fn morton_code_determine_range(idx2morton: &[u32], idx1: usize) -> (usize, usize
     let mc2: u32 = idx2morton[idx1 + 1];
     if mc0 == mc1 && mc1 == mc2 {
         // for hash value collision
-        let mut jmc = idx1 + 1;
-        while jmc < num_mc {
-            jmc += 1;
-            if idx2morton[jmc] != mc1 {
-                break;
+        let mut jdx = idx1 + 1;
+        while jdx < num_mc - 1 {
+            jdx += 1;
+            if idx2morton[jdx] != mc1 {
+                return (idx1, jdx - 1);
             }
         }
-        return (idx1, jmc - 1);
+        return (idx1, jdx);
     }
     // get direction
     // (d==+1) -> imc is left-end, move forward
@@ -196,11 +212,11 @@ fn morton_code_determine_range(idx2morton: &[u32], idx1: usize) -> (usize, usize
     let delta_min = delta(idx1, (idx1 as i64 - d) as usize, idx2morton);
     let mut lmax: i64 = 2;
     loop {
-        let jmc = idx1 as i64 + lmax * d;
-        if jmc < 0 || jmc >= idx2morton.len() as i64 {
+        let jdx = idx1 as i64 + lmax * d;
+        if jdx < 0 || jdx >= idx2morton.len() as i64 {
             break;
         }
-        if delta(idx1, jmc.try_into().unwrap(), idx2morton) <= delta_min {
+        if delta(idx1, jdx.try_into().unwrap(), idx2morton) <= delta_min {
             break;
         }
         lmax *= 2;
@@ -211,10 +227,10 @@ fn morton_code_determine_range(idx2morton: &[u32], idx1: usize) -> (usize, usize
         let mut l = 0;
         let mut t = lmax / 2;
         while t >= 1 {
-            let jmc = idx1 as i64 + (l + t) * d;
-            if jmc >= 0
-                && jmc < idx2morton.len() as i64
-                && delta(idx1, jmc as usize, idx2morton) > delta_min
+            let jdx = idx1 as i64 + (l + t) * d;
+            if jdx >= 0
+                && jdx < idx2morton.len() as i64
+                && delta(idx1, jdx as usize, idx2morton) > delta_min
             {
                 l += t;
             }
@@ -222,11 +238,11 @@ fn morton_code_determine_range(idx2morton: &[u32], idx1: usize) -> (usize, usize
         }
         l
     };
-    let j = (idx1 as i64 + l * d) as usize;
-    if idx1 <= j {
-        (idx1, j)
+    let jdx = (idx1 as i64 + l * d) as usize;
+    if idx1 <= jdx {
+        (idx1, jdx)
     } else {
-        (j, idx1)
+        (jdx, idx1)
     }
 }
 
@@ -272,7 +288,7 @@ fn morton_code_find_split(idx2morton: &[u32], i_mc_start: usize, i_mc_end: usize
     assert!(i_mc_start <= i_mc_end);
     let mut step: usize = i_mc_end - i_mc_start;
     while step > 1 {
-        step = (step + 1) / 2; // half step
+        step = step.div_ceil(2); // (step + 1) / 2; // half step
         let i_mc_new: usize = i_mc_split + step; // proposed new position
         if i_mc_new >= i_mc_end {
             continue;
@@ -285,15 +301,15 @@ fn morton_code_find_split(idx2morton: &[u32], i_mc_start: usize, i_mc_end: usize
     i_mc_split
 }
 
-pub fn bvhnodes_morton<Index>(nodes: &mut [Index], idx2vtx: &[usize], idx2morton: &[u32])
+pub fn update_bvhnodes<Index>(bvhnodes: &mut [Index], idx2vtx: &[Index], idx2morton: &[u32])
 where
     Index: num_traits::PrimInt + 'static + Copy,
     usize: AsPrimitive<Index>,
 {
     assert_eq!(idx2vtx.len(), idx2morton.len());
     assert!(!idx2morton.is_empty());
-    assert_eq!(nodes.len(), (idx2morton.len() * 2 - 1) * 3);
-    nodes[0] = Index::max_value();
+    assert_eq!(bvhnodes.len(), (idx2morton.len() * 2 - 1) * 3);
+    bvhnodes[0] = Index::max_value();
 
     let num_branch = idx2morton.len() - 1; // number of branch
     for i_branch in 0..num_branch {
@@ -302,27 +318,27 @@ where
         assert_ne!(isplit, usize::MAX);
         if range.0 == isplit {
             let i_bvhnode_a = num_branch + isplit; // leaf node
-            nodes[i_branch * 3 + 1] = i_bvhnode_a.as_();
-            nodes[i_bvhnode_a * 3] = i_branch.as_();
-            nodes[i_bvhnode_a * 3 + 1] = idx2vtx[isplit].as_();
-            nodes[i_bvhnode_a * 3 + 2] = Index::max_value();
+            bvhnodes[i_branch * 3 + 1] = i_bvhnode_a.as_();
+            bvhnodes[i_bvhnode_a * 3] = i_branch.as_();
+            bvhnodes[i_bvhnode_a * 3 + 1] = idx2vtx[isplit];
+            bvhnodes[i_bvhnode_a * 3 + 2] = Index::max_value();
         } else {
             let i_bvhnode_a = isplit;
-            nodes[i_branch * 3 + 1] = i_bvhnode_a.as_();
-            nodes[i_bvhnode_a * 3] = i_branch.as_();
+            bvhnodes[i_branch * 3 + 1] = i_bvhnode_a.as_();
+            bvhnodes[i_bvhnode_a * 3] = i_branch.as_();
         }
         // ----
         if range.1 == isplit + 1 {
             // leaf node
             let i_bvhnode_b = num_branch + isplit + 1;
-            nodes[i_branch * 3 + 2] = i_bvhnode_b.as_();
-            nodes[i_bvhnode_b * 3] = i_branch.as_();
-            nodes[i_bvhnode_b * 3 + 1] = idx2vtx[isplit + 1].as_();
-            nodes[i_bvhnode_b * 3 + 2] = Index::max_value();
+            bvhnodes[i_branch * 3 + 2] = i_bvhnode_b.as_();
+            bvhnodes[i_bvhnode_b * 3] = i_branch.as_();
+            bvhnodes[i_bvhnode_b * 3 + 1] = idx2vtx[isplit + 1];
+            bvhnodes[i_bvhnode_b * 3 + 2] = Index::max_value();
         } else {
             let i_bvhnode_b = isplit + 1;
-            nodes[i_branch * 3 + 2] = i_bvhnode_b.as_();
-            nodes[i_bvhnode_b * 3] = i_branch.as_();
+            bvhnodes[i_branch * 3 + 2] = i_bvhnode_b.as_();
+            bvhnodes[i_bvhnode_b * 3] = i_branch.as_();
         }
     }
 }
@@ -332,8 +348,8 @@ fn test_3d() {
     let num_vtx = 100000;
     let vtx2xyz: Vec<f32> = {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
-        (0..num_vtx * 3).map(|_| rng.gen::<f32>()).collect()
+        let mut rng = rand::rng();
+        (0..num_vtx * 3).map(|_| rng.random::<f32>()).collect()
     };
     let mut idx2vtx = vec![0usize; num_vtx];
     let mut idx2morton = vec![0u32; num_vtx];
@@ -343,7 +359,7 @@ fn test_3d() {
         &mut idx2morton,
         &mut vtx2morton,
         &vtx2xyz,
-        &del_geo_core::mat4_col_major::identity(),
+        &del_geo_core::mat4_col_major::from_identity(),
     );
     for idx in 0..num_vtx - 1 {
         let jdx = idx + 1;
@@ -351,7 +367,7 @@ fn test_3d() {
     }
     check_morton_code_range_split(&idx2morton);
     let mut bvhnodes = vec![0usize; (num_vtx * 2 - 1) * 3];
-    bvhnodes_morton(&mut bvhnodes, &idx2vtx, &idx2morton);
+    update_bvhnodes(&mut bvhnodes, &idx2vtx, &idx2morton);
     crate::bvhnodes::check_bvh_topology(&bvhnodes, num_vtx);
 }
 
@@ -360,8 +376,8 @@ fn test_2d() {
     let num_vtx = 100000;
     let vtx2xy: Vec<f32> = {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
-        (0..num_vtx * 2).map(|_| rng.gen::<f32>()).collect()
+        let mut rng = rand::rng();
+        (0..num_vtx * 2).map(|_| rng.random::<f32>()).collect()
     };
     let mut idx2vtx = vec![0usize; num_vtx];
     let mut idx2morton = vec![0u32; num_vtx];
@@ -371,7 +387,7 @@ fn test_2d() {
         &mut idx2morton,
         &mut vtx2morton,
         &vtx2xy,
-        &del_geo_core::mat3_col_major::identity::<f32>(),
+        &del_geo_core::mat3_col_major::from_identity::<f32>(),
     );
     for idx in 0..num_vtx - 1 {
         let jdx = idx + 1;
@@ -379,9 +395,61 @@ fn test_2d() {
     }
     check_morton_code_range_split(&idx2morton);
     let mut bvhnodes = vec![0usize; (num_vtx * 2 - 1) * 3];
-    bvhnodes_morton(&mut bvhnodes, &idx2vtx, &idx2morton);
+    update_bvhnodes(&mut bvhnodes, &idx2vtx, &idx2morton);
     crate::bvhnodes::check_bvh_topology(&bvhnodes, num_vtx);
 }
+
+pub fn update_sorted_morton_code<Index>(
+    idx2tri: &mut [Index],
+    idx2morton: &mut [u32],
+    tri2morton: &mut [u32],
+    vtx2xyz: &[f32],
+    num_dim: usize,
+) where
+    Index: num_traits::PrimInt + num_traits::AsPrimitive<usize>,
+    usize: AsPrimitive<Index>,
+{
+    match num_dim {
+        2 => {
+            let aabb = crate::vtx2xy::aabb2(vtx2xyz);
+            let transform_xy2uni =
+                del_geo_core::aabb2::to_transformation_world2unit_ortho_preserve_asp(&aabb);
+            sorted_morten_code2(idx2tri, idx2morton, tri2morton, vtx2xyz, &transform_xy2uni);
+        }
+        3 => {
+            let aabb = crate::vtx2xyz::aabb3(vtx2xyz, 0f32);
+            let transform_xy2uni =
+                del_geo_core::mat4_col_major::from_aabb3_fit_into_unit_preserve_asp(&aabb);
+            // del_geo_core::mat4_col_major::from_aabb3_fit_into_unit(&aabb);
+            sorted_morten_code3(idx2tri, idx2morton, tri2morton, vtx2xyz, &transform_xy2uni);
+        }
+        _ => {
+            panic!();
+        }
+    }
+}
+
+/*
+pub fn update_for_vtx2xyz<Index>(bvhnodes: &mut [Index], vtx2xyz: &[f32], num_dim: usize)
+where
+    Index: num_traits::PrimInt + AsPrimitive<usize>,
+    usize: AsPrimitive<Index>,
+{
+    let num_tri = vtx2xyz.len() / num_dim;
+    assert_eq!(bvhnodes.len(), (num_tri * 2 - 1) * 3);
+    let mut idx2tri = vec![Index::one(); num_tri];
+    let mut idx2morton = vec![0u32; num_tri];
+    let mut tri2morton = vec![0u32; num_tri];
+    update_for_sorted_morton_code(
+        &mut idx2tri,
+        &mut idx2morton,
+        &mut tri2morton,
+        vtx2xyz,
+        num_dim,
+    );
+    bvhnodes_morton(bvhnodes, &idx2tri, &idx2morton);
+}
+ */
 
 pub fn from_vtx2xyz<Index>(vtx2xyz: &[f32], num_dim: usize) -> Vec<Index>
 where
@@ -389,40 +457,18 @@ where
     usize: AsPrimitive<Index>,
 {
     let num_tri = vtx2xyz.len() / num_dim;
-    let mut idx2tri = vec![0usize; num_tri];
+    let mut idx2tri = vec![Index::one(); num_tri];
     let mut idx2morton = vec![0u32; num_tri];
     let mut tri2morton = vec![0u32; num_tri];
-    match num_dim {
-        2 => {
-            let aabb = crate::vtx2xy::aabb2(vtx2xyz);
-            let transform_xy2uni =
-                del_geo_core::aabb2::to_transformation_world2unit_ortho_preserve_asp(&aabb);
-            sorted_morten_code2(
-                &mut idx2tri,
-                &mut idx2morton,
-                &mut tri2morton,
-                vtx2xyz,
-                &transform_xy2uni,
-            );
-        }
-        3 => {
-            let aabb = crate::vtx2xyz::aabb3(vtx2xyz, 0f32);
-            let transform_xy2uni =
-                del_geo_core::aabb3::to_transformation_world2unit_ortho_preserve_asp(&aabb);
-            sorted_morten_code3(
-                &mut idx2tri,
-                &mut idx2morton,
-                &mut tri2morton,
-                vtx2xyz,
-                &transform_xy2uni,
-            );
-        }
-        _ => {
-            panic!();
-        }
-    }
+    update_sorted_morton_code(
+        &mut idx2tri,
+        &mut idx2morton,
+        &mut tri2morton,
+        vtx2xyz,
+        num_dim,
+    );
     let mut bvhnodes = vec![Index::zero(); (num_tri * 2 - 1) * 3];
-    bvhnodes_morton(&mut bvhnodes, &idx2tri, &idx2morton);
+    update_bvhnodes(&mut bvhnodes, &idx2tri, &idx2morton);
     bvhnodes
 }
 
@@ -434,4 +480,30 @@ where
     let tri2cntr =
         crate::elem2center::from_uniform_mesh_as_points::<Index, f32>(tri2vtx, 3, vtx2xy, num_dim);
     from_vtx2xyz(&tri2cntr, num_dim)
+}
+
+pub fn update_for_triangle_mesh<Index>(
+    bvhnodes: &mut [Index],
+    tri2vtx: &[Index],
+    vtx2xy: &[f32],
+    num_dim: usize,
+) where
+    Index: num_traits::PrimInt + AsPrimitive<usize>,
+    usize: AsPrimitive<Index>,
+{
+    let num_tri = tri2vtx.len() / 3;
+    assert_eq!(bvhnodes.len(), (num_tri * 2 - 1) * 3);
+    let tri2cntr =
+        crate::elem2center::from_uniform_mesh_as_points::<Index, f32>(tri2vtx, 3, vtx2xy, num_dim);
+    let mut idx2tri = vec![Index::one(); num_tri];
+    let mut idx2morton = vec![0u32; num_tri];
+    let mut tri2morton = vec![0u32; num_tri];
+    update_sorted_morton_code(
+        &mut idx2tri,
+        &mut idx2morton,
+        &mut tri2morton,
+        &tri2cntr,
+        num_dim,
+    );
+    update_bvhnodes(bvhnodes, &idx2tri, &idx2morton);
 }

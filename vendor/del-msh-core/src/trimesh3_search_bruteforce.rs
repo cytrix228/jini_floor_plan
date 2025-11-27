@@ -1,28 +1,39 @@
 //! methods for query computation on 3D triangle mesh
 
-pub fn first_intersection_ray(
-    ray_org: &[f32; 3],
-    ray_dir: &[f32; 3],
-    vtx2xyz: &[f32],
-    tri2vtx: &[usize],
-) -> Option<([f32; 3], usize)> {
-    let mut hit_pos = Vec::<(f32, usize)>::new();
+pub fn first_intersection_ray<Index, Real>(
+    ray_org: &[Real; 3],
+    ray_dir: &[Real; 3],
+    tri2vtx: &[Index],
+    vtx2xyz: &[Real],
+) -> Option<(Real, Index)>
+where
+    Index: num_traits::PrimInt + num_traits::AsPrimitive<usize>,
+    usize: num_traits::AsPrimitive<Index>,
+    Real: num_traits::Float,
+{
+    use num_traits::AsPrimitive;
+    let mut hit_pos = Vec::<(Real, Index)>::new();
     for i_tri in 0..tri2vtx.len() / 3 {
-        let Some(t) = crate::trimesh3::to_tri3(i_tri, tri2vtx, vtx2xyz)
-            .intersection_against_ray(ray_org, ray_dir) else { continue; };
-        hit_pos.push((t, i_tri));
+        let Some(t) = crate::trimesh3::to_tri3(tri2vtx, vtx2xyz, i_tri)
+            .intersection_against_ray(ray_org, ray_dir)
+        else {
+            continue;
+        };
+        hit_pos.push((t, i_tri.as_()));
     }
     if hit_pos.is_empty() {
         return None;
     }
     hit_pos.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let t = hit_pos[0].0;
+    /*
+            //let t = hit_pos[0].0;
     let a = [
         t * ray_dir[0] + ray_org[0],
         t * ray_dir[1] + ray_org[1],
         t * ray_dir[2] + ray_org[2],
     ];
-    Some((a, hit_pos[0].1))
+     */
+    Some(hit_pos[0])
 }
 
 #[allow(clippy::identity_op)]
@@ -34,7 +45,7 @@ fn triangles_in_sphere(
     tri2vtx: &[usize],
     tri2adjtri: &[usize],
 ) -> Vec<usize> {
-    use crate::vtx2xyz::to_navec3;
+    use crate::vtx2xyz::to_vec3;
     use del_geo_core::vec3;
     let mut res = Vec::<usize>::new();
     let mut searched = std::collections::BTreeSet::<usize>::new();
@@ -49,13 +60,13 @@ fn triangles_in_sphere(
             let i0 = tri2vtx[iel0 * 3 + 0];
             let i1 = tri2vtx[iel0 * 3 + 1];
             let i2 = tri2vtx[iel0 * 3 + 2];
-            let (pn, _r0, _r1) = del_geo_nalgebra::tri3::nearest_to_point3(
-                &to_navec3(vtx2xyz, i0),
-                &to_navec3(vtx2xyz, i1),
-                &to_navec3(vtx2xyz, i2),
-                &nalgebra::Vector3::<f32>::from_row_slice(&pos),
+            let (pn, _r0, _r1) = del_geo_core::tri3::nearest_to_point3(
+                to_vec3(vtx2xyz, i0),
+                to_vec3(vtx2xyz, i1),
+                to_vec3(vtx2xyz, i2),
+                &pos,
             );
-            vec3::distance(pn.as_ref(), &pos)
+            vec3::distance(&pn, &pos)
         };
         if dist_min > rad {
             continue;

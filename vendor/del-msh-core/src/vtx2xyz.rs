@@ -13,13 +13,9 @@ where
     ]
 }
 
-pub fn to_navec3<T>(vtx2xyz: &[T], i_vtx: usize) -> nalgebra::Vector3<T>
-where
-    T: Copy + nalgebra::RealField,
-{
-    nalgebra::Vector3::<T>::from_row_slice(&vtx2xyz[i_vtx * 3..(i_vtx + 1) * 3])
-}
-
+/// 3D Axis-aligned bonding box for 3D points
+/// # Arguments
+/// * eps: T - margin
 pub fn aabb3<T>(vtx2xyz: &[T], eps: T) -> [T; 6]
 where
     T: num_traits::Float,
@@ -27,62 +23,12 @@ where
     assert!(!vtx2xyz.is_empty());
     let mut aabb = [T::zero(); 6];
     {
-        {
-            let cgx = vtx2xyz[0];
-            aabb[0] = cgx - eps;
-            aabb[3] = cgx + eps;
-        }
-        {
-            let cgy = vtx2xyz[1];
-            aabb[1] = cgy - eps;
-            aabb[4] = cgy + eps;
-        }
-        {
-            let cgz = vtx2xyz[2];
-            aabb[2] = cgz - eps;
-            aabb[5] = cgz + eps;
-        }
+        let xyz = arrayref::array_ref!(vtx2xyz, 0, 3);
+        del_geo_core::aabb3::set_as_cube(&mut aabb, xyz, eps);
     }
-    for i_vtx in 1..vtx2xyz.len() / 3 {
-        {
-            let cgx = vtx2xyz[i_vtx * 3];
-            aabb[0] = if cgx - eps < aabb[0] {
-                cgx - eps
-            } else {
-                aabb[0]
-            };
-            aabb[3] = if cgx + eps > aabb[3] {
-                cgx + eps
-            } else {
-                aabb[3]
-            };
-        }
-        {
-            let cgy = vtx2xyz[i_vtx * 3 + 1];
-            aabb[1] = if cgy - eps < aabb[1] {
-                cgy - eps
-            } else {
-                aabb[1]
-            };
-            aabb[4] = if cgy + eps > aabb[4] {
-                cgy + eps
-            } else {
-                aabb[4]
-            };
-        }
-        {
-            let cgz = vtx2xyz[i_vtx * 3 + 2];
-            aabb[2] = if cgz - eps < aabb[2] {
-                cgz - eps
-            } else {
-                aabb[2]
-            };
-            aabb[5] = if cgz + eps > aabb[5] {
-                cgz + eps
-            } else {
-                aabb[5]
-            };
-        }
+    for xyz in vtx2xyz.chunks(3) {
+        let xyz = arrayref::array_ref!(xyz, 0, 3);
+        del_geo_core::aabb3::add_point(&mut aabb, xyz, eps);
     }
     assert!(aabb[0] <= aabb[3]);
     assert!(aabb[1] <= aabb[4]);
@@ -99,63 +45,13 @@ where
     let mut aabb = [Real::zero(); 6];
     {
         let i_vtx: usize = idx2vtx[0].as_();
-        {
-            let cgx = vtx2xyz[i_vtx * 3];
-            aabb[0] = cgx - eps;
-            aabb[3] = cgx + eps;
-        }
-        {
-            let cgy = vtx2xyz[i_vtx * 3 + 1];
-            aabb[1] = cgy - eps;
-            aabb[4] = cgy + eps;
-        }
-        {
-            let cgz = vtx2xyz[i_vtx * 3 + 2];
-            aabb[2] = cgz - eps;
-            aabb[5] = cgz + eps;
-        }
+        let xyz = arrayref::array_ref!(vtx2xyz, i_vtx * 3, 3);
+        del_geo_core::aabb3::set_as_cube(&mut aabb, xyz, eps);
     }
     for &i_vtx in idx2vtx.iter().skip(1) {
         let i_vtx: usize = i_vtx.as_();
-        {
-            let cgx = vtx2xyz[i_vtx * 3];
-            aabb[0] = if cgx - eps < aabb[0] {
-                cgx - eps
-            } else {
-                aabb[0]
-            };
-            aabb[3] = if cgx + eps > aabb[3] {
-                cgx + eps
-            } else {
-                aabb[3]
-            };
-        }
-        {
-            let cgy = vtx2xyz[i_vtx * 3 + 1];
-            aabb[1] = if cgy - eps < aabb[1] {
-                cgy - eps
-            } else {
-                aabb[1]
-            };
-            aabb[4] = if cgy + eps > aabb[4] {
-                cgy + eps
-            } else {
-                aabb[4]
-            };
-        }
-        {
-            let cgz = vtx2xyz[i_vtx * 3 + 2];
-            aabb[2] = if cgz - eps < aabb[2] {
-                cgz - eps
-            } else {
-                aabb[2]
-            };
-            aabb[5] = if cgz + eps > aabb[5] {
-                cgz + eps
-            } else {
-                aabb[5]
-            };
-        }
+        let xyz = arrayref::array_ref!(vtx2xyz, i_vtx * 3, 3);
+        del_geo_core::aabb3::add_point(&mut aabb, xyz, eps);
     }
     assert!(aabb[0] <= aabb[3]);
     assert!(aabb[1] <= aabb[4]);
@@ -166,18 +62,26 @@ where
 /// Oriented Bounding Box (OBB)
 pub fn obb3<Real>(vtx2xyz: &[Real]) -> [Real; 12]
 where
-    Real: nalgebra::RealField + Copy,
+    Real: num_traits::Float + Copy + 'static + std::iter::Sum + num_traits::FloatConst,
     usize: AsPrimitive<Real>,
 {
-    let (cov, cog) = crate::vtx2xdim::cov_cog::<Real, 3>(vtx2xyz);
-    let svd = cov.svd(true, true);
-    let r: nalgebra::Matrix3<Real> = svd.v_t.unwrap(); // row is the axis vectors
+    use del_geo_core::vec3::Vec3;
+    let (cov, cog) = crate::vtx2xn::cov_cog::<Real, 3>(vtx2xyz);
+    use slice_of_array::SliceFlatExt;
+    let cov = cov.flat();
+    let cov = arrayref::array_ref![cov, 0, 9];
+    let (_u, _s, v) = del_geo_core::mat3_row_major::svd(
+        cov,
+        del_geo_core::mat3_sym::EigenDecompositionModes::Analytic,
+    )
+    .unwrap();
+    // let r: nalgebra::Matrix3<Real> = svd.v_t.unwrap(); // row is the axis vectors
     let mut x_size = Real::zero();
     let mut y_size = Real::zero();
     let mut z_size = Real::zero();
     for xyz in vtx2xyz.chunks(3) {
-        let p = nalgebra::Vector3::<Real>::from_row_slice(xyz);
-        let l = r * (p - cog);
+        let xyz = arrayref::array_ref![xyz, 0, 3];
+        let l = del_geo_core::mat3_col_major::mult_vec(&v, &xyz.sub(&cog)); // v^t * (v-cog)
         x_size = if l[0].abs() > x_size {
             l[0].abs()
         } else {
@@ -194,16 +98,18 @@ where
             z_size
         };
     }
+    let (v0, v1, v2) = del_geo_core::mat3_row_major::to_columns(&v);
     let mut out = [Real::zero(); 12];
     out[0..3].copy_from_slice(cog.as_slice());
-    out[3..6].copy_from_slice((r.row(0) * x_size).as_slice());
-    out[6..9].copy_from_slice((r.row(1) * y_size).as_slice());
-    out[9..12].copy_from_slice((r.row(2) * z_size).as_slice());
+    out[3..6].copy_from_slice(&v0.scale(x_size));
+    out[6..9].copy_from_slice(&v1.scale(y_size));
+    out[9..12].copy_from_slice(&v2.scale(z_size));
     out
 }
 
 #[test]
 fn test_obb3() {
+    use del_geo_core::vec3::Vec3;
     let (x_size, y_size, z_size) = (0.3, 0.1, 0.5);
     let aabb3 = [-x_size, -y_size, -z_size, x_size, y_size, z_size];
     use rand::SeedableRng;
@@ -217,32 +123,33 @@ fn test_obb3() {
     assert!(obb0[1].abs() < 0.01);
     assert!(obb0[2].abs() < 0.01);
     //
-    // let transl_vec = nalgebra::Vector3::<f32>::new(0.3, -1.0, 0.5);
-    let transl_vec = nalgebra::Vector3::<f32>::new(0.3, -1.0, 0.5);
-    let rot_vec = nalgebra::Vector3::<f32>::new(0.5, 0.0, 0.0);
-    //
-    let rot = nalgebra::Matrix4::<f32>::new_rotation(rot_vec.clone());
-    let transl = nalgebra::Matrix4::<f32>::new_translation(&transl_vec);
-    let mat = transl * rot;
-    let vtx2xyz1 = transform(&vtx2xyz0, mat.as_slice().try_into().unwrap());
+    let transl_vec = [0.3, -1.0, 0.5];
+    let transl = del_geo_core::mat4_col_major::from_translate(&transl_vec);
+    let rot = del_geo_core::mat4_col_major::from_bryant_angles(0.5, 0.0, 0.0);
+    let mat = del_geo_core::mat4_col_major::mult_mat_col_major(&transl, &rot);
+    let vtx2xyz1 = transform_homogeneous(&vtx2xyz0, &mat);
     let obb1 = obb3(&vtx2xyz1);
     assert!((obb1[0] - transl_vec[0]).abs() < 0.01);
     assert!((obb1[1] - transl_vec[1]).abs() < 0.01);
     assert!((obb1[2] - transl_vec[2]).abs() < 0.01);
-    let ea = nalgebra::Vector3::<f32>::from_row_slice(&obb1[3..6]);
-    let eb = nalgebra::Vector3::<f32>::from_row_slice(&obb1[6..9]);
-    let ec = nalgebra::Vector3::<f32>::from_row_slice(&obb1[9..12]);
+    let (ea, eb, ec) = {
+        let ea = arrayref::array_ref![&obb1, 3, 3];
+        let eb = arrayref::array_ref![&obb1, 6, 3];
+        let ec = arrayref::array_ref![&obb1, 9, 3];
+        let mut a = [(ea, ea.norm()), (eb, eb.norm()), (ec, ec.norm())];
+        a.sort_by(|&(_a0, a1), &(_b0, b1)| a1.partial_cmp(&b1).unwrap());
+        (a[2].0, a[1].0, a[0].0)
+    };
     assert!((ea.norm() - 0.5).abs() < 0.05);
     assert!((eb.norm() - 0.3).abs() < 0.05);
     assert!((ec.norm() - 0.1).abs() < 0.05);
+    let rot3 = del_geo_core::mat4_col_major::to_mat3_col_major_xyz(&rot);
+    let (dirb1, dirc1, dira1) = del_geo_core::mat3_col_major::to_columns(&rot3);
     let dira0 = ea.normalize();
-    let dira1 = nalgebra::Vector3::<f32>::from_homogeneous(rot.column(2).into_owned()).unwrap();
     assert!(dira0.cross(&dira1).norm() < 0.01);
     let dirb0 = eb.normalize();
-    let dirb1 = nalgebra::Vector3::<f32>::from_homogeneous(rot.column(0).into_owned()).unwrap();
     assert!(dirb0.cross(&dirb1).norm() < 0.02);
     let dirc0 = ec.normalize();
-    let dirc1 = nalgebra::Vector3::<f32>::from_homogeneous(rot.column(1).into_owned()).unwrap();
     assert!(dirc0.cross(&dirc1).norm() < 0.01);
     // check all the points are included
     for xyz in vtx2xyz1.chunks(3) {
@@ -283,15 +190,26 @@ pub fn translate_then_scale<Real>(
      */
 }
 
-pub fn transform<Real>(vtx2xyz: &[Real], m: &[Real; 16]) -> Vec<Real>
+pub fn transform_homogeneous<Real>(vtx2xyz: &[Real], m: &[Real; 16]) -> Vec<Real>
 where
     Real: num_traits::Float,
 {
     vtx2xyz
         .chunks(3)
         .flat_map(|v| {
-            del_geo_core::mat4_col_major::transform_homogeneous(m, arrayref::array_ref![v,0,3]).unwrap()
+            del_geo_core::mat4_col_major::transform_homogeneous(m, arrayref::array_ref![v, 0, 3])
+                .unwrap()
         })
+        .collect()
+}
+
+pub fn transform_linear<Real>(vtx2xyz: &[Real], m: &[Real; 9]) -> Vec<Real>
+where
+    Real: num_traits::Float,
+{
+    vtx2xyz
+        .chunks(3)
+        .flat_map(|v| del_geo_core::mat3_col_major::mult_vec(m, arrayref::array_ref![v, 0, 3]))
         .collect()
 }
 
@@ -310,10 +228,72 @@ where
     vtx2xyz_out
 }
 
+#[allow(clippy::identity_op)]
+pub fn normalize_in_place<Real>(vtx2xyz: &mut [Real], size: Real)
+where
+    Real: num_traits::Float,
+{
+    let num_vtx = vtx2xyz.len() / 3;
+    let mut mins = [Real::one(); 3];
+    let mut maxs = [-Real::one(); 3];
+    for ivtx in 0..num_vtx {
+        let x0 = vtx2xyz[ivtx * 3 + 0];
+        let y0 = vtx2xyz[ivtx * 3 + 1];
+        let z0 = vtx2xyz[ivtx * 3 + 2];
+        if ivtx == 0 {
+            mins[0] = x0;
+            maxs[0] = x0;
+            mins[1] = y0;
+            maxs[1] = y0;
+            mins[2] = z0;
+            maxs[2] = z0;
+        } else {
+            mins[0] = if x0 < mins[0] { x0 } else { mins[0] };
+            maxs[0] = if x0 > maxs[0] { x0 } else { maxs[0] };
+            mins[1] = if y0 < mins[1] { y0 } else { mins[1] };
+            maxs[1] = if y0 > maxs[1] { y0 } else { maxs[1] };
+            mins[2] = if z0 < mins[2] { z0 } else { mins[2] };
+            maxs[2] = if z0 > maxs[2] { z0 } else { maxs[2] };
+        }
+    }
+    let half = Real::one() / (Real::one() + Real::one());
+    let cntr = [
+        (mins[0] + maxs[0]) * half,
+        (mins[1] + maxs[1]) * half,
+        (mins[2] + maxs[2]) * half,
+    ];
+    let scale = {
+        let mut size0 = maxs[0] - mins[0];
+        if maxs[1] - mins[1] > size0 {
+            size0 = maxs[1] - mins[1];
+        }
+        if maxs[2] - mins[2] > size0 {
+            size0 = maxs[2] - mins[2];
+        }
+        size / size0
+    };
+    for ivtx in 0..num_vtx {
+        let x0 = vtx2xyz[ivtx * 3 + 0];
+        let y0 = vtx2xyz[ivtx * 3 + 1];
+        let z0 = vtx2xyz[ivtx * 3 + 2];
+        vtx2xyz[ivtx * 3 + 0] = (x0 - cntr[0]) * scale;
+        vtx2xyz[ivtx * 3 + 1] = (y0 - cntr[1]) * scale;
+        vtx2xyz[ivtx * 3 + 2] = (z0 - cntr[2]) * scale;
+    }
+}
+
 // ------------------------------------------------
 
 pub fn to_xyz<Real>(vtx2xyz: &[Real], i_vtx: usize) -> del_geo_core::vec3::XYZ<Real> {
     del_geo_core::vec3::XYZ {
         p: arrayref::array_ref![vtx2xyz, i_vtx * 3, 3],
     }
+}
+
+pub fn to_vec3<Real>(vtx2xyz: &[Real], i_vtx: usize) -> &[Real; 3] {
+    arrayref::array_ref![vtx2xyz, i_vtx * 3, 3]
+}
+
+pub fn to_vec3_mut<Real>(vtx2xyz: &mut [Real], i_vtx: usize) -> &mut [Real; 3] {
+    arrayref::array_mut_ref![vtx2xyz, i_vtx * 3, 3]
 }

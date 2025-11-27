@@ -1,6 +1,6 @@
 use anyhow::Context;
 use candle_nn::Optimizer;
-use del_candle::voronoi2::VoronoiInfo;
+use del_candle::voronoi2::{Layer, VoronoiInfo};
 use del_canvas_core::canvas_gif::Canvas;
 use serde::Deserialize;
 use std::any::Any;
@@ -130,7 +130,7 @@ fn load_project_params() -> anyhow::Result<Vec<ProjectParams>> {
     param_files.sort();
 
     if param_files.is_empty() {
-        let legacy = Path::new("params.toml");
+        let legacy = Path::new("ex__params.toml");
         if legacy.exists() {
             param_files.push(legacy.to_path_buf());
         }
@@ -246,9 +246,17 @@ pub fn my_paint(
             &[site2xy[i_site * 2 + 0], site2xy[i_site * 2 + 1]],
             arrayref::array_ref![transform_to_scr.as_slice(),0,9],
             2.0,
-            i_color,
+            
+            // black dot
+            255
+
+            //i_color,
         );
     }
+
+    // print check point time
+    // println!("Check point time: {:?} at draw cell boundary", std::time::Instant::now());
+
     // draw cell boundary
     for i_site in 0..site2idx.len() - 1 {
         let num_vtx_in_site = site2idx[i_site + 1] - site2idx[i_site];
@@ -278,6 +286,9 @@ pub fn my_paint(
             }
         }
     }
+
+    // println!("Check point time: {:?} at draw room boundary", std::time::Instant::now());
+
     // draw room boundary
     for i_edge in 0..edge2vtxv_wall.len() / 2 {
         let i0_vtxv = edge2vtxv_wall[i_edge * 2 + 0];
@@ -292,6 +303,9 @@ pub fn my_paint(
             1,
         );
     }
+
+    // println!("Check point time: {:?} at rasterize polygon stroke", std::time::Instant::now());
+
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         del_canvas_core::rasterize_polygon::stroke(
             &mut canvas.data,
@@ -755,6 +769,51 @@ fn enforce_min_site_distance(coords: &mut [f32], min_distance: f32) {
     }
 }
 
+fn find_overlapping_sites(coords: &[f32], tolerance: f32) -> Option<(usize, usize)> {
+    if coords.len() < 4 {
+        return None;
+    }
+    let num_site = coords.len() / 2;
+    for i in 0..num_site {
+        let xi = coords[i * 2];
+        let yi = coords[i * 2 + 1];
+        for j in (i + 1)..num_site {
+            let xj = coords[j * 2];
+            let yj = coords[j * 2 + 1];
+            if (xi - xj).abs() <= tolerance && (yi - yj).abs() <= tolerance {
+                return Some((i, j));
+            }
+        }
+    }
+    None
+}
+
+fn enforce_site_spacing(
+    site2xy: &candle_core::Var,
+    min_site_radius: f32,
+) -> candle_core::Result<candle_core::Tensor> {
+    let coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
+    let num_site = if coords.is_empty() {
+        0
+    } else {
+        coords.len() / 2
+    };
+    let mut adjusted = coords.clone();
+    let min_site_distance = min_site_radius.max(1.0e-6);
+    enforce_min_site_distance(&mut adjusted, min_site_distance);
+    let delta: Vec<f32> = adjusted
+        .iter()
+        .zip(coords.iter())
+        .map(|(adj, orig)| adj - orig)
+        .collect();
+    let delta_tensor = candle_core::Tensor::from_vec(
+        delta,
+        candle_core::Shape::from((num_site, 2)),
+        &candle_core::Device::Cpu,
+    )?;
+    site2xy.add(&delta_tensor)
+}
+
 pub fn site2room(num_site: usize, room2area: &[f32]) -> Vec<usize> {
     let num_room = room2area.len();
     let mut site2room: Vec<usize> = vec![usize::MAX; num_site];
@@ -822,55 +881,53 @@ fn boundary_span(vtxl2xy: &[f32]) -> f32 {
     (max_x - min_x).abs().max((max_y - min_y).abs()).max(1.0)
 }
 
-fn jitter_overlapping_sites(
-    site2xy: &candle_core::Var,
+fn build_voronoi_geometry(
     vtxl2xy: &[f32],
-) -> candle_core::Result<candle_core::Tensor> {
-    let coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
-    let num_site = if coords.is_empty() {
-        0
-    } else {
-        coords.len() / 2
-    };
-    let span = boundary_span(vtxl2xy);
-    let jitter_step = span * 1.0e-5_f32;
-    let tolerance = span * 1.0e-7_f32 + f32::EPSILON;
-    let mut delta = vec![0f32; coords.len()];
-    const OFFSETS: &[(f32, f32)] = &[
-        (1.0, 0.0),
-        (0.0, 1.0),
-        (1.0, 1.0),
-        (-1.0, 0.0),
-        (0.0, -1.0),
-        (-1.0, -1.0),
-        (1.0, -1.0),
-        (-1.0, 1.0),
-    ];
-    for i in 0..num_site {
-        let xi = coords[i * 2 + 0];
-        let yi = coords[i * 2 + 1];
-        let mut duplicates = 0usize;
-        for j in 0..i {
-            let xj = coords[j * 2 + 0] + delta[j * 2 + 0];
-            let yj = coords[j * 2 + 1] + delta[j * 2 + 1];
-            if (xi - xj).abs() <= tolerance && (yi - yj).abs() <= tolerance {
-                duplicates += 1;
-            }
-        }
-        if duplicates > 0 {
-            let dir = OFFSETS[(duplicates - 1) % OFFSETS.len()];
-            let shift = jitter_step * duplicates as f32;
-            delta[i * 2 + 0] += shift * dir.0;
-            delta[i * 2 + 1] += shift * dir.1;
+    site2xy: &candle_core::Tensor,
+    site2room: &[usize],
+) -> anyhow::Result<(candle_core::Tensor, VoronoiInfo)> {
+    let alive: Vec<bool> = site2room.iter().map(|room| *room != usize::MAX).collect();
+    let site_coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
+    let site2cells = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        del_msh_core::voronoi2::voronoi_cells(vtxl2xy, &site_coords, |i_site| alive[i_site])
+    }))
+    .map_err(|payload| {
+        let message = panic_payload_to_string(payload.as_ref());
+        let backtrace = Backtrace::force_capture();
+        anyhow::anyhow!(
+            "voronoi_cells() panicked while building geometry: {message}\nBacktrace:\n{backtrace}"
+        )
+    })?;
+
+    #[cfg(debug_assertions)]
+    for (i_site, cell) in site2cells.iter().enumerate() {
+        if alive[i_site] && cell.vtx2xy.is_empty() {
+            eprintln!(
+                "[floorplan] warning: site {i_site} was marked alive but produced an empty Voronoi cell"
+            );
         }
     }
-    let delta_tensor = candle_core::Tensor::from_vec(
-        delta,
-        candle_core::Shape::from((num_site, 2)),
-        &candle_core::Device::Cpu,
-    )?;
-    site2xy.add(&delta_tensor)
+
+    let voronoi_mesh = del_msh_core::voronoi2::indexing(&site2cells);
+    let layer = Layer {
+        vtxl2xy: vtxl2xy.to_vec(),
+        vtxv2info: voronoi_mesh.vtxv2info.clone(),
+    };
+    let vtxv2xy = site2xy.apply_op1(layer)?;
+    let idx2site = del_msh_core::elem2elem::from_polygon_mesh(
+        &voronoi_mesh.site2idx,
+        &voronoi_mesh.idx2vtxv,
+        vtxv2xy.dims2()?.0,
+    );
+    let info = VoronoiInfo {
+        site2idx: voronoi_mesh.site2idx,
+        idx2vtxv: voronoi_mesh.idx2vtxv,
+        idx2site,
+        vtxv2info: voronoi_mesh.vtxv2info,
+    };
+    Ok((vtxv2xy, info))
 }
+
 fn optimize_iteration(
     vtxl2xy: &[f32],
     site2xy: &candle_core::Var,
@@ -889,19 +946,25 @@ fn optimize_iteration(
 )> {
     let (num_rooms, _) = room2area_trg.dims2()?;
     let loss_weights = &params.loss_weights;
-    let site2xy_adjusted = jitter_overlapping_sites(site2xy, vtxl2xy)?;
-    let (vtxv2xy, voronoi_info) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        del_candle::voronoi2::voronoi(vtxl2xy, &site2xy_adjusted, |i_site| {
-            site2room[i_site] != usize::MAX
-        })
-    }))
-    .map_err(|payload| {
-        let message = panic_payload_to_string(payload.as_ref());
-        let backtrace = Backtrace::force_capture();
-        anyhow::anyhow!(
-            "voronoi() panicked while building geometry: {message}\nBacktrace:\n{backtrace}"
-        )
-    })?;
+    let min_site_radius = boundary_span(vtxl2xy) * 1.0e-3_f32;
+    let site2xy_adjusted = enforce_site_spacing(site2xy, min_site_radius)?;
+
+    #[cfg(debug_assertions)]
+    {
+        let adjusted_coords = site2xy_adjusted.flatten_all()?.to_vec1::<f32>()?;
+        if let Some((i0, i1)) =
+            find_overlapping_sites(&adjusted_coords, min_site_radius.max(1.0e-6))
+        {
+            eprintln!(
+                "[floorplan] overlapping sites detected after spacing ({} and {})",
+                i0, i1
+            );
+        }
+    }
+
+
+    // println!("Check point time: {:?} at voronoi", std::time::Instant::now());
+    let (vtxv2xy, voronoi_info) = build_voronoi_geometry(vtxl2xy, &site2xy_adjusted, site2room)?;
     let edge2vtxv_wall = crate::edge2vtvx_wall(&voronoi_info, site2room);
     let (loss_each_area, loss_total_area) = {
         let room2area = crate::room2area(
@@ -1039,10 +1102,7 @@ fn optimize_phase(
             params,
         )?;
 
-        // insert maintain the minimum distance between all sites
-        let mut site2xy_render = site2xy_adjusted.flatten_all()?.to_vec1::<f32>()?;
-        let min_site_distance = boundary_span(vtxl2xy) * 1.0e-3_f32;
-        enforce_min_site_distance(&mut site2xy_render, min_site_distance.max(1.0e-6));
+        let site2xy_render = site2xy_adjusted.flatten_all()?.to_vec1::<f32>()?;
         let vtxv2xy_render = vtxv2xy.flatten_all()?.to_vec1::<f32>()?;
         canvas_gif.clear(0);
         crate::my_paint(

@@ -1,4 +1,3 @@
-use del_geo_nalgebra::ccd::FaceVertex;
 use num_traits::AsPrimitive;
 
 #[allow(clippy::identity_op)]
@@ -11,7 +10,7 @@ pub fn edge_edge_between_bvh_branches<T>(
     bvhnodes: &[usize],
     aabbs: &[T],
 ) where
-    T: nalgebra::RealField + Copy + num_traits::Float,
+    T: Copy + num_traits::Float + 'static + std::fmt::Debug + std::fmt::Display,
     i64: AsPrimitive<T>,
     f64: AsPrimitive<T>,
 {
@@ -20,7 +19,8 @@ pub fn edge_edge_between_bvh_branches<T>(
     // trim branch
     if !del_geo_core::aabb3::is_intersect(
         arrayref::array_ref![aabbs, ibvh0 * 6, 6],
-        arrayref::array_ref![aabbs, ibvh1 * 6, 6]) {
+        arrayref::array_ref![aabbs, ibvh1 * 6, 6],
+    ) {
         return;
     }
     let ichild0_left = bvhnodes[ibvh0 * 3 + 1];
@@ -118,27 +118,27 @@ pub fn edge_edge_between_bvh_branches<T>(
         if i1 == j0 || i1 == j1 {
             return;
         };
-        use crate::vtx2xyz::to_navec3;
-        let a0s = to_navec3(vtx2xyz0, i0);
-        let a1s = to_navec3(vtx2xyz0, i1);
-        let b0s = to_navec3(vtx2xyz0, j0);
-        let b1s = to_navec3(vtx2xyz0, j1);
-        let a0e = to_navec3(vtx2xyz1, i0);
-        let a1e = to_navec3(vtx2xyz1, i1);
-        let b0e = to_navec3(vtx2xyz1, j0);
-        let b1e = to_navec3(vtx2xyz1, j1);
-        let t = del_geo_nalgebra::ccd::intersecting_time_ee(
-            del_geo_nalgebra::ccd::EdgeEdge {
-                a0: &a0s,
-                a1: &a1s,
-                b0: &b0s,
-                b1: &b1s,
+        use crate::vtx2xyz::to_vec3;
+        let a0s = to_vec3(vtx2xyz0, i0);
+        let a1s = to_vec3(vtx2xyz0, i1);
+        let b0s = to_vec3(vtx2xyz0, j0);
+        let b1s = to_vec3(vtx2xyz0, j1);
+        let a0e = to_vec3(vtx2xyz1, i0);
+        let a1e = to_vec3(vtx2xyz1, i1);
+        let b0e = to_vec3(vtx2xyz1, j0);
+        let b1e = to_vec3(vtx2xyz1, j1);
+        let t = del_geo_core::ccd3::intersecting_time_ee(
+            del_geo_core::ccd3::EdgeEdge {
+                a0: a0s,
+                a1: a1s,
+                b0: b0s,
+                b1: b1s,
             },
-            del_geo_nalgebra::ccd::EdgeEdge {
-                a0: &a0e,
-                a1: &a1e,
-                b0: &b0e,
-                b1: &b1e,
+            del_geo_core::ccd3::EdgeEdge {
+                a0: a0e,
+                a1: a1e,
+                b0: b0e,
+                b1: b1e,
             },
             1.0e-5f64.as_(),
         );
@@ -156,7 +156,7 @@ pub fn edge_edge_inside_branch<T>(
     bvhnodes: &[usize],
     aabbs: &[T],
 ) where
-    T: nalgebra::RealField + Copy + num_traits::Float,
+    T: Copy + num_traits::Float + 'static + std::fmt::Display + std::fmt::Debug,
     i64: AsPrimitive<T>,
     f64: AsPrimitive<T>,
 {
@@ -187,7 +187,7 @@ pub fn search_with_bvh<T>(
     _aabbs: &[T],
 ) -> (Vec<usize>, Vec<T>)
 where
-    T: num_traits::Float + nalgebra::RealField,
+    T: num_traits::Float + 'static + std::fmt::Debug + std::fmt::Display,
     i64: AsPrimitive<T>,
     f64: AsPrimitive<T>,
 {
@@ -212,7 +212,7 @@ pub fn search_brute_force<T>(
     epsilon: T,
 ) -> (Vec<usize>, Vec<T>)
 where
-    T: num_traits::Float + nalgebra::RealField,
+    T: num_traits::Float + 'static + std::fmt::Display + std::fmt::Debug,
     i64: AsPrimitive<T>,
     f64: AsPrimitive<T>,
 {
@@ -233,31 +233,32 @@ where
             if i0 == j0 || i0 == j1 || i1 == j0 || i1 == j1 {
                 continue;
             };
-            use crate::vtx2xyz::to_navec3;
-            let a0s = to_navec3(vtx2xyz0, i0);
-            let a1s = to_navec3(vtx2xyz0, i1);
-            let b0s = to_navec3(vtx2xyz0, j0);
-            let b1s = to_navec3(vtx2xyz0, j1);
-            let a0e = to_navec3(vtx2xyz1, i0);
-            let a1e = to_navec3(vtx2xyz1, i1);
-            let b0e = to_navec3(vtx2xyz1, j0);
-            let b1e = to_navec3(vtx2xyz1, j1);
-            let t = del_geo_nalgebra::ccd::intersecting_time_ee(
-                del_geo_nalgebra::ccd::EdgeEdge {
-                    a0: &a0s,
-                    a1: &a1s,
-                    b0: &b0s,
-                    b1: &b1s,
+            use crate::vtx2xyz::to_vec3;
+            let a0s = to_vec3(vtx2xyz0, i0);
+            let a1s = to_vec3(vtx2xyz0, i1);
+            let b0s = to_vec3(vtx2xyz0, j0);
+            let b1s = to_vec3(vtx2xyz0, j1);
+            let a0e = to_vec3(vtx2xyz1, i0);
+            let a1e = to_vec3(vtx2xyz1, i1);
+            let b0e = to_vec3(vtx2xyz1, j0);
+            let b1e = to_vec3(vtx2xyz1, j1);
+            let t = del_geo_core::ccd3::intersecting_time_ee(
+                del_geo_core::ccd3::EdgeEdge {
+                    a0: a0s,
+                    a1: a1s,
+                    b0: b0s,
+                    b1: b1s,
                 },
-                del_geo_nalgebra::ccd::EdgeEdge {
-                    a0: &a0e,
-                    a1: &a1e,
-                    b0: &b0e,
-                    b1: &b1e,
+                del_geo_core::ccd3::EdgeEdge {
+                    a0: a0e,
+                    a1: a1e,
+                    b0: b0e,
+                    b1: b1e,
                 },
                 epsilon,
             );
             if let Some(t) = t {
+                // println!("ee {} {} {}", t, i_edge, j_edge);
                 intersection_pair.extend([i_edge, j_edge, 0]);
                 intersection_times.push(t);
             }
@@ -274,31 +275,32 @@ where
             if i0 == j_vtx || i1 == j_vtx || i2 == j_vtx {
                 continue;
             };
-            use crate::vtx2xyz::to_navec3;
-            let f0s = to_navec3(vtx2xyz0, i0);
-            let f1s = to_navec3(vtx2xyz0, i1);
-            let f2s = to_navec3(vtx2xyz0, i2);
-            let v0s = to_navec3(vtx2xyz0, j_vtx);
-            let f0e = to_navec3(vtx2xyz1, i0);
-            let f1e = to_navec3(vtx2xyz1, i1);
-            let f2e = to_navec3(vtx2xyz1, i2);
-            let v0e = to_navec3(vtx2xyz1, j_vtx);
-            let t = del_geo_nalgebra::ccd::intersecting_time_fv(
-                FaceVertex {
-                    f0: &f0s,
-                    f1: &f1s,
-                    f2: &f2s,
-                    v: &v0s,
+            use crate::vtx2xyz::to_vec3;
+            let f0s = to_vec3(vtx2xyz0, i0);
+            let f1s = to_vec3(vtx2xyz0, i1);
+            let f2s = to_vec3(vtx2xyz0, i2);
+            let v0s = to_vec3(vtx2xyz0, j_vtx);
+            let f0e = to_vec3(vtx2xyz1, i0);
+            let f1e = to_vec3(vtx2xyz1, i1);
+            let f2e = to_vec3(vtx2xyz1, i2);
+            let v0e = to_vec3(vtx2xyz1, j_vtx);
+            let t = del_geo_core::ccd3::intersecting_time_fv(
+                del_geo_core::ccd3::FaceVertex {
+                    f0: f0s,
+                    f1: f1s,
+                    f2: f2s,
+                    v: v0s,
                 },
-                FaceVertex {
-                    f0: &f0e,
-                    f1: &f1e,
-                    f2: &f2e,
-                    v: &v0e,
+                del_geo_core::ccd3::FaceVertex {
+                    f0: f0e,
+                    f1: f1e,
+                    f2: f2e,
+                    v: v0e,
                 },
                 epsilon,
             );
             if let Some(t) = t {
+                // println!("fv {} {} {}", t, i_tri, j_vtx);
                 intersection_pair.extend([i_tri, j_vtx, 1]);
                 intersection_times.push(t);
             }

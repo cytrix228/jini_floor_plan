@@ -1,11 +1,13 @@
+//! methods for 2D Voronoi diagram
+
 #[derive(Clone)]
 pub struct Cell {
-    pub vtx2xy: Vec<nalgebra::Vector2<f32>>,
+    pub vtx2xy: Vec<f32>,
     pub vtx2info: Vec<[usize; 4]>,
 }
 
 impl Cell {
-    fn is_inside(&self, p: &nalgebra::Vector2<f32>) -> bool {
+    fn is_inside(&self, p: &[f32; 2]) -> bool {
         let wn = crate::polyloop2::winding_number(&self.vtx2xy, p);
         (wn - 1.0).abs() < 0.1
     }
@@ -14,8 +16,8 @@ impl Cell {
         crate::polyloop2::area(&self.vtx2xy)
     }
 
-    fn new_from_polyloop2(vtx2xy_in: &[nalgebra::Vector2<f32>]) -> Self {
-        let vtx2info = (0..vtx2xy_in.len())
+    fn new_from_polyloop2(vtx2xy_in: &[f32]) -> Self {
+        let vtx2info = (0..vtx2xy_in.len() / 2)
             .map(|v| [v, usize::MAX, usize::MAX, usize::MAX])
             .collect();
         Cell {
@@ -25,20 +27,22 @@ impl Cell {
     }
 
     fn new_empty() -> Self {
-        let vtx2xy: Vec<nalgebra::Vector2<f32>> = vec![];
+        let vtx2xy: Vec<f32> = vec![];
         let vtx2info = vec![[usize::MAX; 4]; 0];
         Cell { vtx2xy, vtx2info }
     }
 }
 
 fn hoge(
-    vtx2xy: &[nalgebra::Vector2<f32>],
+    vtx2xy: &[f32],
     vtx2info: &[[usize; 4]],
-    vtxnews: &[(f32, usize, nalgebra::Vector2<f32>, [usize; 4])],
+    vtxnews: &[(f32, usize, [f32; 2], [usize; 4])],
     vtx2vtxnew: &[usize],
     vtxnew2isvisisted: &mut [bool],
 ) -> Option<Cell> {
-    let mut vtx2xy_new: Vec<nalgebra::Vector2<f32>> = vec![];
+    let num_vtxnew = vtxnews.len();
+    let num_vtx = vtx2xy.len() / 2;
+    let mut vtx2xy_new: Vec<f32> = vec![];
     let mut vtx2info_new = vec![[usize::MAX; 4]; 0];
     let (i_vtx0, is_new0) = {
         let i_vtxnew_start = vtxnew2isvisisted
@@ -51,25 +55,27 @@ fn hoge(
     loop {
         // dbg!(i_vtx, is_new, is_entry, i_vtx0, is_new0);
         if is_new {
-            vtx2xy_new.push(vtxnews[i_vtx].2);
+            vtx2xy_new.push(vtxnews[i_vtx].2[0]);
+            vtx2xy_new.push(vtxnews[i_vtx].2[1]);
             vtx2info_new.push(vtxnews[i_vtx].3);
             vtxnew2isvisisted[i_vtx] = true;
             if is_entry {
                 i_vtx = vtxnews[i_vtx].1;
-                i_vtx = (i_vtx + 1) % vtx2xy.len();
+                i_vtx = (i_vtx + 1) % num_vtx;
                 // assert!(depth(&vtx2xy[i_vtx]) < 0., "{}", depth(&vtx2xy[i_vtx]));
                 is_new = false;
                 is_entry = false;
             } else {
-                i_vtx -= 1;
+                i_vtx = (i_vtx + num_vtxnew - 1) % num_vtxnew;
                 is_new = true;
                 is_entry = true;
             }
         } else {
-            vtx2xy_new.push(vtx2xy[i_vtx]);
+            vtx2xy_new.push(vtx2xy[i_vtx * 2]);
+            vtx2xy_new.push(vtx2xy[i_vtx * 2 + 1]);
             vtx2info_new.push(vtx2info[i_vtx]);
             if vtx2vtxnew[i_vtx] == usize::MAX {
-                i_vtx = (i_vtx + 1) % vtx2xy.len();
+                i_vtx = (i_vtx + 1) % num_vtx;
                 is_new = false;
             } else {
                 i_vtx = vtx2vtxnew[i_vtx];
@@ -90,39 +96,43 @@ fn hoge(
 /// vtx2xy should be counter-clockwise
 pub fn cut_polygon_by_line(
     cell: &Cell,
-    line_s: &nalgebra::Vector2<f32>,
-    line_n: &nalgebra::Vector2<f32>,
+    line_s: &[f32; 2],
+    line_n: &[f32; 2],
     i_vtx: usize,
     j_vtx: usize,
 ) -> Vec<Cell> {
+    use del_geo_core::vec2::Vec2;
     // negative->inside
-    let depth = |p: &nalgebra::Vector2<f32>| (p - line_s).dot(line_n);
+    let depth = |p: &[f32; 2]| p.sub(line_s).dot(line_n);
+    const DEPTH_EPS: f32 = 1.0e-6;
+    let num_vtx = cell.vtx2xy.len() / 2;
     let (vtxnews, is_inside) = {
-        let line_t = del_geo_nalgebra::vec2::rotate90(line_n);
+        let line_t = del_geo_core::vec2::rotate90(line_n);
         let mut is_inside = false;
-        let mut vtxnews: Vec<(f32, usize, nalgebra::Vector2<f32>, [usize; 4])> = vec![];
-        let eps = 1.0e-8_f32;
-        for i0_vtx in 0..cell.vtx2xy.len() {
-            let i1_vtx = (i0_vtx + 1) % cell.vtx2xy.len();
-            let p0 = &cell.vtx2xy[i0_vtx];
-            let p1 = &cell.vtx2xy[i1_vtx];
+        let mut vtxnews: Vec<(f32, usize, [f32; 2], [usize; 4])> = vec![];
+        for i0_vtx in 0..num_vtx {
+            let i1_vtx = (i0_vtx + 1) % num_vtx;
+            let p0 = crate::vtx2xy::to_vec2(&cell.vtx2xy, i0_vtx);
+            let p1 = crate::vtx2xy::to_vec2(&cell.vtx2xy, i1_vtx);
             let mut d0 = depth(p0);
-            if d0 < 0. {
+            if d0 < -DEPTH_EPS {
+                is_inside = true;
+            } else if d0.abs() < DEPTH_EPS {
+                d0 = 0.;
                 is_inside = true;
             }
             let mut d1 = depth(p1);
-            if d0.abs() < eps {
-                let sign = if d1.abs() >= eps { d1.signum() } else { 1.0 };
-                d0 = eps * sign;
+            if d1.abs() < DEPTH_EPS {
+                d1 = 0.;
             }
-            if d1.abs() < eps {
-                let sign = if d0.abs() >= eps { d0.signum() } else { -1.0 };
-                d1 = eps * sign;
+            if d0 == 0. && d1 == 0. {
+                // edge lies on the bisector; no new vertex generated here
+                continue;
             }
             if d0 * d1 > 0. {
                 continue;
             }
-            let pm = p0.scale(d1 / (d1 - d0)) + p1.scale(d0 / (d0 - d1));
+            let pm = p0.scale(d1 / (d1 - d0)).add(&p1.scale(d0 / (d0 - d1)));
             let t0 = line_t.dot(&pm);
             //
             let info0 = cell.vtx2info[i0_vtx];
@@ -142,21 +152,8 @@ pub fn cut_polygon_by_line(
             //
             vtxnews.push((-t0, i0_vtx, pm, info));
         }
-        vtxnews.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut filtered: Vec<(f32, usize, nalgebra::Vector2<f32>, [usize; 4])> = Vec::with_capacity(vtxnews.len());
-        for entry in vtxnews.into_iter() {
-            let is_duplicate = filtered
-                .last()
-                .map(|prev| (prev.0 - entry.0).abs() < eps)
-                .unwrap_or(false);
-            if !is_duplicate {
-                filtered.push(entry);
-            }
-        }
-        if filtered.len() % 2 != 0 {
-            filtered.pop();
-        }
-        (filtered, is_inside)
+        vtxnews.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        (vtxnews, is_inside)
     };
     if vtxnews.is_empty() {
         // no intersection
@@ -166,9 +163,20 @@ pub fn cut_polygon_by_line(
             vec![]
         };
     }
-    assert_eq!(vtxnews.len() % 2, 0);
+    if vtxnews.len() % 2 != 0 {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "degenerate Voronoi clip: {} intersections (expected even); keeping original cell",
+            vtxnews.len()
+        );
+        return if is_inside {
+            vec![cell.clone()]
+        } else {
+            vec![]
+        };
+    }
     let vtx2vtxnew = {
-        let mut vtx2vtxnew = vec![usize::MAX; cell.vtx2xy.len()];
+        let mut vtx2vtxnew = vec![usize::MAX; num_vtx];
         for (i_vtxnew, vtxnew) in vtxnews.iter().enumerate() {
             vtx2vtxnew[vtxnew.1] = i_vtxnew;
         }
@@ -196,25 +204,25 @@ pub fn voronoi_cells<F>(vtxl2xy: &[f32], site2xy: &[f32], site2isalive: F) -> Ve
 where
     F: Fn(usize) -> bool,
 {
-    let vtxl2xy = crate::vtx2xdim::to_array_of_nalgebra_vector(vtxl2xy);
-    let site2xy: Vec<nalgebra::Vector2<f32>> =
-        crate::vtx2xdim::to_array_of_nalgebra_vector(site2xy);
-    let num_site = site2xy.len();
+    use del_geo_core::vec2::Vec2;
+    let num_site = site2xy.len() / 2;
     let mut site2cell = vec![Cell::new_empty(); num_site];
-    for (i_site, pos_i) in site2xy.iter().enumerate() {
+    for (i_site, pos_i) in site2xy.chunks(2).enumerate() {
+        let pos_i = arrayref::array_ref![pos_i, 0, 2];
         if !site2isalive(i_site) {
             continue;
         }
-        let mut cell_stack = vec![Cell::new_from_polyloop2(&vtxl2xy)];
-        for (j_site, pos_j) in site2xy.iter().enumerate() {
+        let mut cell_stack = vec![Cell::new_from_polyloop2(vtxl2xy)];
+        for (j_site, pos_j) in site2xy.chunks(2).enumerate() {
+            let pos_j = arrayref::array_ref![pos_j, 0, 2];
             if !site2isalive(j_site) {
                 continue;
             }
             if j_site == i_site {
                 continue;
             }
-            let line_s = (pos_i + pos_j) * 0.5;
-            let line_n = (pos_j - pos_i).normalize();
+            let line_s = pos_i.add(pos_j).scale(0.5);
+            let line_n = pos_j.sub(pos_i).normalize();
             let mut cell_stack_new = vec![];
             for cell_in in cell_stack {
                 let cells = cut_polygon_by_line(&cell_in, &line_s, &line_n, i_site, j_site);
@@ -232,11 +240,11 @@ where
         }
         let mut depthcell: Vec<(f32, usize)> = vec![];
         for (i_cell, cell) in cell_stack.iter().enumerate() {
-            let is_inside = cell.is_inside(&site2xy[i_site]);
+            let is_inside = cell.is_inside(crate::vtx2xy::to_vec2(site2xy, i_site));
             let dist = if is_inside { 0. } else { 1.0 / cell.area() };
             depthcell.push((dist, i_cell));
         }
-        depthcell.sort_by(|a, b| a.0.total_cmp(&b.0));
+        depthcell.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let i_cell = depthcell[0].1;
         assert!(!cell_stack[i_cell].vtx2xy.is_empty());
         site2cell[i_site] = cell_stack[i_cell].clone();
@@ -247,7 +255,7 @@ where
 pub struct VoronoiMesh {
     pub site2idx: Vec<usize>,
     pub idx2vtxv: Vec<usize>,
-    pub vtxv2xy: Vec<nalgebra::Vector2<f32>>,
+    pub vtxv2xy: Vec<[f32; 2]>,
     pub vtxv2info: Vec<[usize; 4]>,
 }
 
@@ -273,7 +281,7 @@ pub fn indexing(site2cell: &[Cell]) -> VoronoiMesh {
     let info2vtxv = info2vtxv;
     let vtxv2info = vtxv2info;
     let num_vtxv = info2vtxv.len();
-    let mut vtxv2xy = vec![nalgebra::Vector2::<f32>::zeros(); num_vtxv];
+    let mut vtxv2xy = vec![[0f32; 2]; num_vtxv];
     let mut site2idx = vec![0; 1];
     let mut idx2vtxc = vec![0usize; 0];
     for cell in site2cell.iter() {
@@ -281,7 +289,7 @@ pub fn indexing(site2cell: &[Cell]) -> VoronoiMesh {
             let info0 = sort_info(info);
             let i_vtxv = info2vtxv.get(&info0).unwrap();
             idx2vtxc.push(*i_vtxv);
-            vtxv2xy[*i_vtxv] = cell.vtx2xy[ind];
+            vtxv2xy[*i_vtxv] = *crate::vtx2xy::to_vec2(&cell.vtx2xy, ind);
         }
         site2idx.push(idx2vtxc.len());
     }
@@ -294,50 +302,46 @@ pub fn indexing(site2cell: &[Cell]) -> VoronoiMesh {
     }
 }
 
-pub fn position_of_voronoi_vertex(
-    info: &[usize; 4],
-    vtxl2xy: &[f32],
-    site2xy: &[f32],
-) -> nalgebra::Vector2<f32> {
+pub fn position_of_voronoi_vertex(info: &[usize; 4], vtxl2xy: &[f32], site2xy: &[f32]) -> [f32; 2] {
+    use del_geo_core::vec2::Vec2;
     if info[1] == usize::MAX {
         // original point
-        crate::vtx2xy::to_navec2(vtxl2xy, info[0])
+        *crate::vtx2xy::to_vec2(vtxl2xy, info[0])
     } else if info[3] == usize::MAX {
         // two points against edge
         let num_vtxl = vtxl2xy.len() / 2;
         assert!(info[0] < num_vtxl);
         let i1_loop = info[0];
         let i2_loop = (i1_loop + 1) % num_vtxl;
-        let l1 = crate::vtx2xy::to_navec2(vtxl2xy, i1_loop);
-        let l2 = crate::vtx2xy::to_navec2(vtxl2xy, i2_loop);
-        let s1 = &crate::vtx2xy::to_navec2(site2xy, info[1]);
-        let s2 = &crate::vtx2xy::to_navec2(site2xy, info[2]);
-        return del_geo_nalgebra::line2::intersection(
-            &l1,
-            &(l2 - l1),
-            &((s1 + s2) * 0.5),
-            &del_geo_nalgebra::vec2::rotate90(&(s2 - s1)),
+        let l1 = crate::vtx2xy::to_vec2(vtxl2xy, i1_loop);
+        let l2 = crate::vtx2xy::to_vec2(vtxl2xy, i2_loop);
+        let s1 = &crate::vtx2xy::to_vec2(site2xy, info[1]);
+        let s2 = &crate::vtx2xy::to_vec2(site2xy, info[2]);
+        return del_geo_core::line2::intersection(
+            l1,
+            &l2.sub(l1),
+            &s1.add(s2).scale(0.5),
+            &del_geo_core::vec2::rotate90(&s2.sub(s1)),
         );
     } else {
         // three points
         assert_eq!(info[0], usize::MAX);
-        return del_geo_nalgebra::tri2::circumcenter(
-            &crate::vtx2xy::to_navec2(site2xy, info[1]),
-            &crate::vtx2xy::to_navec2(site2xy, info[2]),
-            &crate::vtx2xy::to_navec2(site2xy, info[3]),
+        return del_geo_core::tri2::circumcenter(
+            crate::vtx2xy::to_vec2(site2xy, info[1]),
+            crate::vtx2xy::to_vec2(site2xy, info[2]),
+            crate::vtx2xy::to_vec2(site2xy, info[3]),
         );
     }
 }
 
 #[test]
 fn test_voronoi_concave() {
-    let mut reng = rand::thread_rng();
+    let mut reng = rand::rng();
     // let vtxl2xy = vec![0.0, 0.0, 1.0, 0.0, 1.0, 0.5, 0.5, 0.5, 0.5, 1.0, 0.0, 1.0];
     let vtxl2xy = vec![
         0.0, 0.0, 1.0, 0.0, 1.0, 0.2, 0.2, 0.2, 0.2, 0.5, 1.0, 0.5, 1.0, 1.0, 0.0, 1.0,
     ];
-    let site2xy =
-        crate::sampling::poisson_disk_sampling_from_polyloop2(&vtxl2xy, 0.15, 30, &mut reng);
+    let site2xy = crate::polyloop2::poisson_disk_sampling(&vtxl2xy, 0.15, 30, &mut reng);
     let num_site = site2xy.len() / 2;
     {
         // save boundary loop and input points
@@ -345,7 +349,7 @@ fn test_voronoi_concave() {
         let mut vtxl2xy = vtxl2xy.clone();
         vtxl2xy.extend(site2xy.clone());
         let _ = crate::io_obj::save_edge2vtx_vtx2xyz(
-            "target/voronoi_concave_input.obj",
+            "../target/voronoi_concave_input.obj",
             &crate::edge2vtx::from_polyloop(num_vtxl),
             &vtxl2xy,
             2,
@@ -357,35 +361,37 @@ fn test_voronoi_concave() {
         let mut edge2vtxo = vec![0usize; 0];
         let mut vtxo2xy = vec![0f32; 0];
         for i_site in 0..num_site {
-            let vtxc2xy = crate::vtx2xdim::from_array_of_nalgebra(&site2cell[i_site].vtx2xy);
+            let vtxc2xy = &site2cell[i_site].vtx2xy;
             let edge2vtxc = crate::edge2vtx::from_polyloop(vtxc2xy.len() / 2);
             crate::uniform_mesh::merge(&mut edge2vtxo, &mut vtxo2xy, &edge2vtxc, &vtxc2xy, 2);
         }
-        let _ = crate::io_obj::save_edge2vtx_vtx2xyz(
-            "target/voronoi_concave_cells.obj",
+        crate::io_obj::save_edge2vtx_vtx2xyz(
+            "../target/voronoi_concave_cells.obj",
             &edge2vtxo,
             &vtxo2xy,
             2,
-        );
+        )
+        .unwrap();
     }
 }
 
 #[test]
 fn test_voronoi_convex() {
-    let mut reng = rand::thread_rng();
+    use del_geo_core::vec2::Vec2;
+    let mut reng = rand::rng();
     let vtxl2xy = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
-    let site2xy =
-        crate::sampling::poisson_disk_sampling_from_polyloop2(&vtxl2xy, 0.15, 30, &mut reng);
+    let site2xy = crate::polyloop2::poisson_disk_sampling(&vtxl2xy, 0.15, 30, &mut reng);
     let num_site = site2xy.len() / 2;
     {
         let mut vtxl2xy = vtxl2xy.clone();
         vtxl2xy.extend(site2xy.clone());
-        let _ = crate::io_obj::save_edge2vtx_vtx2xyz(
-            "target/voronoi_convex_input.obj",
+        crate::io_obj::save_edge2vtx_vtx2xyz(
+            "../target/voronoi_convex_input.obj",
             &[0, 1, 1, 2, 2, 3, 3, 0],
             &vtxl2xy,
             2,
-        );
+        )
+        .unwrap();
     }
     let site2cell = voronoi_cells(&vtxl2xy, &site2xy, |_isite| true);
     assert_eq!(site2cell.len(), num_site);
@@ -394,12 +400,12 @@ fn test_voronoi_convex() {
         let mut edge2vtxo = vec![0usize; 0];
         let mut vtxo2xy = vec![0f32; 0];
         for i_site in 0..num_site {
-            let vtxc2xy = crate::vtx2xdim::from_array_of_nalgebra(&site2cell[i_site].vtx2xy);
+            let vtxc2xy = &site2cell[i_site].vtx2xy;
             let edge2vtxc = crate::edge2vtx::from_polyloop(vtxc2xy.len() / 2);
             crate::uniform_mesh::merge(&mut edge2vtxo, &mut vtxo2xy, &edge2vtxc, &vtxc2xy, 2);
         }
         let _ = crate::io_obj::save_edge2vtx_vtx2xyz(
-            "target/voronoi_convex_cells.obj",
+            "../target/voronoi_convex_cells.obj",
             &edge2vtxo,
             &vtxo2xy,
             2,
@@ -411,15 +417,15 @@ fn test_voronoi_convex() {
         let vtxc2info = &site2cell[i_site].vtx2info;
         for (i_vtxc, info) in vtxc2info.iter().enumerate() {
             let cc0 = position_of_voronoi_vertex(info, &vtxl2xy, &site2xy);
-            let cc1 = vtxc2xy[i_vtxc];
-            assert!((cc0 - cc1).norm() < 1.0e-5);
+            let cc1 = crate::vtx2xy::to_vec2(vtxc2xy, i_vtxc);
+            assert!(cc0.sub(cc1).norm() < 1.0e-5);
         }
     }
     let voronoi_mesh = indexing(&site2cell);
     for (i_vtxc, info) in voronoi_mesh.vtxv2info.iter().enumerate() {
         let cc0 = position_of_voronoi_vertex(info, &vtxl2xy, &site2xy);
         let cc1 = voronoi_mesh.vtxv2xy[i_vtxc];
-        assert!((cc0 - cc1).norm() < 1.0e-5);
+        assert!(cc0.sub(&cc1).norm() < 1.0e-5);
     }
     {
         // write edges to file
@@ -428,13 +434,15 @@ fn test_voronoi_convex() {
             &voronoi_mesh.idx2vtxv,
             voronoi_mesh.vtxv2xy.len(),
         );
-        let vtxc2xy = crate::vtx2xdim::from_array_of_nalgebra(&voronoi_mesh.vtxv2xy);
-        let _ = crate::io_obj::save_edge2vtx_vtx2xyz(
-            "target/voronoi_convex_indexed.obj",
+        use slice_of_array::SliceFlatExt;
+        let vtxc2xy = voronoi_mesh.vtxv2xy.flat();
+        crate::io_obj::save_edge2vtx_vtx2xyz(
+            "../target/voronoi_convex_indexed.obj",
             &edge2vtxc,
             &vtxc2xy,
             2,
-        );
+        )
+        .unwrap();
     }
 }
 
@@ -492,10 +500,11 @@ fn test_voronoi_sites_on_edge() {
         }
         vedge2pnt
     };
-    let _ = crate::io_obj::save_edge2vtx_vtx2xyz(
-        "target/voronoi_sites_on_edge.obj",
+    crate::io_obj::save_edge2vtx_vtx2xyz(
+        "../target/voronoi_sites_on_edge.obj",
         &vedge2pnt,
         &pnt2xy,
         2,
-    );
+    )
+    .unwrap();
 }

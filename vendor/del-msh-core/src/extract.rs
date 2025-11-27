@@ -32,13 +32,16 @@ pub fn extract(
     (tri2vtx_new, num_vtx_new, vtx2vtx_new)
 }
 
-pub fn map_values_old2new(
-    old2value: &[f32],
+pub fn map_values_old2new<VALUE>(
+    old2value: &[VALUE],
     od2new: &[usize],
     num_new: usize,
     num_dim: usize,
-) -> Vec<f32> {
-    let mut new2value = vec![0_f32; num_new * num_dim];
+) -> Vec<VALUE>
+where
+    VALUE: num_traits::Zero + Copy,
+{
+    let mut new2value = vec![VALUE::zero(); num_new * num_dim];
     for i_old in 0..old2value.len() / num_dim {
         let i_new = od2new[i_old];
         if i_new == usize::MAX {
@@ -106,6 +109,20 @@ pub fn from_uniform_mesh_lambda<F: Fn(usize) -> bool>(
         if !elem2flag(i_elem) {
             continue;
         }
+        for i_node in 0..num_node {
+            felem2vtx.push(elem2vtx[i_elem * num_node + i_node]);
+        }
+    }
+    felem2vtx
+}
+
+pub fn from_uniform_mesh_from_list_of_elements(
+    elem2vtx: &[usize],
+    num_node: usize,
+    elems: &[usize],
+) -> Vec<usize> {
+    let mut felem2vtx = Vec::<usize>::with_capacity(elems.len() * num_node);
+    for i_elem in elems {
         for i_node in 0..num_node {
             felem2vtx.push(elem2vtx[i_elem * num_node + i_node]);
         }

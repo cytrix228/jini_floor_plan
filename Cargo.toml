@@ -38,7 +38,7 @@ toml = "0.8"
 
 
 [patch.crates-io]
-# del-msh-core = { path = "vendor/del-msh-core" }
+del-msh-core = { path = "vendor/del-msh-core" }
 del-canvas-core = { path = "vendor/del-canvas-core" }
 del-candle = { path = "vendor/del-candle" }
 
