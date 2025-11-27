@@ -21,15 +21,15 @@ where
         let (ray_org, ray_dir) =
             crate::cam3::ray3_homogeneous((i_w, i_h), img_shape, transform_ndc2world);
         let mut hits: Vec<(f32, usize)> = vec![];
-        del_msh_core::bvh3::search_intersection_ray::<Index>(
+        del_msh_core::search_bvh3::intersections_ray::<Index>(
             &mut hits,
             &ray_org,
             &ray_dir,
-            &del_msh_core::bvh3::TriMeshWithBvh {
+            &del_msh_core::search_bvh3::TriMeshWithBvh {
                 tri2vtx,
                 vtx2xyz,
                 bvhnodes,
-                aabbs,
+                bvhnode2aabb: aabbs,
             },
             0,
         );
@@ -68,15 +68,15 @@ pub fn render_depth_bvh(
             let (ray_org, ray_dir) =
                 crate::cam3::ray3_homogeneous((iw, ih), &image_size, transform_ndc2world);
             let mut hits: Vec<(f32, usize)> = vec![];
-            del_msh_core::bvh3::search_intersection_ray(
+            del_msh_core::search_bvh3::intersections_ray(
                 &mut hits,
                 &ray_org,
                 &ray_dir,
-                &del_msh_core::bvh3::TriMeshWithBvh {
+                &del_msh_core::search_bvh3::TriMeshWithBvh {
                     tri2vtx,
                     vtx2xyz,
                     bvhnodes,
-                    aabbs,
+                    bvhnode2aabb: aabbs,
                 },
                 0,
             );
@@ -109,10 +109,10 @@ pub fn render_normalmap_from_pix2tri(
             if i_tri == usize::MAX {
                 continue;
             }
-            let tri = del_msh_core::trimesh3::to_tri3(i_tri, tri2vtx, vtx2xyz);
+            let tri = del_msh_core::trimesh3::to_tri3(tri2vtx, vtx2xyz, i_tri);
             let nrm = tri.normal();
-            let nrm = del_geo_core::mat4_col_major::transform_vector(cam_modelviewd, &nrm);
-            let unrm = del_geo_core::vec3::normalized(&nrm);
+            let nrm = del_geo_core::mat4_col_major::transform_direction(cam_modelviewd, &nrm);
+            let unrm = del_geo_core::vec3::normalize(&nrm);
             img[(ih * width + iw) * 3] = unrm[0] * 0.5 + 0.5;
             img[(ih * width + iw) * 3 + 1] = unrm[1] * 0.5 + 0.5;
             img[(ih * width + iw) * 3 + 2] = unrm[2] * 0.5 + 0.5;
@@ -142,10 +142,11 @@ pub fn render_texture_from_pix2tri(
             if i_tri == usize::MAX {
                 continue;
             }
-            let tri = del_msh_core::trimesh3::to_tri3(i_tri, tri2vtx, vtx2xyz);
+            // let tri = del_msh_core::trimesh3::to_tri3(i_tri, tri2vtx, vtx2xyz);
+            let tri = del_msh_core::trimesh3::to_tri3(tri2vtx, vtx2xyz, i_tri);
             let a = tri.intersection_against_ray(&ray_org, &ray_dir).unwrap();
             let q = del_geo_core::vec3::axpy(a, &ray_dir, &ray_org);
-            let bc = del_geo_core::tri3::barycentric_coords(tri.p0, tri.p1, tri.p2, &q);
+            let bc = del_geo_core::tri3::to_barycentric_coords(tri.p0, tri.p1, tri.p2, &q);
             let uv0 = arrayref::array_ref!(vtx2uv, tri2vtx[i_tri * 3 + 0] * 2, 2);
             let uv1 = arrayref::array_ref!(vtx2uv, tri2vtx[i_tri * 3 + 1] * 2, 2);
             let uv2 = arrayref::array_ref!(vtx2uv, tri2vtx[i_tri * 3 + 2] * 2, 2);

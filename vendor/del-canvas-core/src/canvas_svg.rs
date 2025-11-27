@@ -38,9 +38,10 @@ impl crate::canvas_svg::Canvas {
         stroke_width: Option<f32>,
         fill: Option<i32>,
     ) {
+        let transform = arrayref::array_ref![transform_xy2pix.as_slice(), 0, 9];
         let s = format!(
             "<polygon points=\"{}\" {} {} {} />",
-            del_msh_core::polyloop2::to_svg(vtx2xy, transform_xy2pix),
+            del_msh_core::polyloop2::to_svg(vtx2xy, transform),
             if stroke_color.is_some() {
                 format!("stroke=\"#{:06X}\"", stroke_color.unwrap())
             } else {

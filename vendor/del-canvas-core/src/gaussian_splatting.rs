@@ -86,7 +86,7 @@ struct Splat<'a> {
 }
 
 impl<'a> Splat<'a> {
-    fn new(data: &[f32; 10]) -> Splat {
+    fn new(data: &'a [f32; 10]) -> Splat<'a> {
         Splat { data }
     }
 
@@ -101,7 +101,7 @@ impl<'a> Splat<'a> {
 
     fn is_include_point(&self, p: &nalgebra::Vector2<f32>) -> bool {
         let aabb = arrayref::array_ref![self.data, 5, 4];
-        del_geo_core::aabb2::is_inlcude_point(aabb, &[p[0], p[1]])
+        del_geo_core::aabb2::is_include_point2(aabb, &[p[0], p[1]])
     }
 
     fn alpha(&self, t: &nalgebra::Vector2<f32>) -> f32 {
@@ -120,7 +120,7 @@ pub struct Gauss<'a> {
 }
 
 impl<'a> Gauss<'a> {
-    pub fn new(data: &[f32; 14]) -> Gauss {
+    pub fn new(data: &'a [f32; 14]) -> Gauss<'a> {
         Gauss { data }
     }
 

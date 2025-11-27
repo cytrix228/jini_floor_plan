@@ -1,5 +1,10 @@
 use del_candle::voronoi2::VoronoiInfo;
 
+fn site_vec(site2xy: &[f32], i_site: usize) -> nalgebra::Vector2<f32> {
+    let coords = del_msh_core::vtx2xy::to_vec2(site2xy, i_site);
+    nalgebra::Vector2::<f32>::new(coords[0], coords[1])
+}
+
 fn topology(
     voronoi_info: &VoronoiInfo,
     num_room: usize,
@@ -118,9 +123,9 @@ fn find_nearest_site(
     let mut pair = (0usize, 0usize);
     let mut min_dist = f32::INFINITY;
     for &i_site in room2site[i0_room].iter() {
-        let pi = del_msh_core::vtx2xy::to_navec2(site2xy, i_site);
+        let pi = site_vec(site2xy, i_site);
         for &j_site in room2site[i1_room].iter() {
-            let pj = del_msh_core::vtx2xy::to_navec2(site2xy, j_site);
+            let pj = site_vec(site2xy, j_site);
             let dist = (pi - pj).norm();
             if dist < min_dist {
                 min_dist = dist;
@@ -209,12 +214,12 @@ pub fn unidirectional(
                     continue;
                 }
                 for &j_site in &group2site[j_group] {
-                    let pj = del_msh_core::vtx2xy::to_navec2(&site2xy0, j_site);
+                    let pj = site_vec(&site2xy0, j_site);
                     let mut dist_min = f32::INFINITY;
                     let mut pi_min = nalgebra::Vector2::<f32>::new(0., 0.);
                     for &i_site in &group2site[i_group] {
                         assert_ne!(i_site, j_site);
-                        let pi = del_msh_core::vtx2xy::to_navec2(&site2xy0, i_site);
+                        let pi = site_vec(&site2xy0, i_site);
                         let dist = (pj - pi).norm();
                         if dist < dist_min {
                             pi_min = pi;

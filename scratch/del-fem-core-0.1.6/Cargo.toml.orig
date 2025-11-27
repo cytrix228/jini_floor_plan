@@ -1,0 +1,27 @@
+[package]
+name = "del-fem-core"
+description = "finite element method (FEM) utility codes"
+documentation = "https://docs.rs/del_fem-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+num-traits.workspace = true
+nalgebra.workspace = true
+itertools.workspace = true
+arrayref.workspace = true
+del-geo-core.workspace = true
+del-msh-core.workspace = true
+
+# for develop/push
+del-fem-ls = {workspace = true}
+
+# for deploy
+# del-fem-ls = "0.1.5"
+
+[dev-dependencies]
+rand.workspace = true
+rand_chacha.workspace = true
+anyhow.workspace = true

@@ -375,11 +375,9 @@ pub fn random_room_color<RNG>(reng: &mut RNG) -> i32
 where
     RNG: rand::Rng,
 {
-    let h = reng.gen::<f32>();
-    let s = reng.gen::<f32>();
-    let s = 0.5 + 0.1 * s;
-    let v = reng.gen::<f32>();
-    let v = 0.9 + 0.1 * v;
+    let h = reng.random::<f32>();
+    let s = 0.5 + 0.1 * reng.random::<f32>();
+    let v = 0.9 + 0.1 * reng.random::<f32>();
     let (r, g, b) = del_canvas_core::color::rgb_from_hsv(h, s, v);
     let r = (r * 255.0) as u8;
     let g = (g * 255.0) as u8;
@@ -468,7 +466,7 @@ where
         if (end - start).abs() <= f32::EPSILON {
             start
         } else {
-            rng.gen_range(start..end)
+            rng.random_range(start..end)
         }
     }
 
@@ -496,13 +494,13 @@ where
     dbg!("samples length: {}", samples.len());
 
     while !active.is_empty() {
-        let idx = rng.gen_range(0..active.len());
+        let idx = rng.random_range(0..active.len());
         let base_idx = active[idx];
         let base = samples[base_idx];
         let mut found = false;
         for _ in 0..k {
-            let angle = rng.gen_range(0.0..(2.0 * std::f32::consts::PI));
-            let dist = rng.gen_range(radius..(2.0 * radius));
+            let angle = rng.random_range(0.0..(2.0 * std::f32::consts::PI));
+            let dist = rng.random_range(radius..(2.0 * radius));
             let candidate = (base.0 + angle.cos() * dist, base.1 + angle.sin() * dist);
             if candidate.0 < min_x
                 || candidate.0 > max_x
@@ -697,7 +695,7 @@ pub fn remove_site_too_close(site2room: &mut [usize], site2xy: &candle_core::Ten
         if i_room == usize::MAX {
             continue;
         }
-        let p_i = del_msh_core::vtx2xy::to_navec2(&site2xy, i_site);
+        let p_i = site_vec(&site2xy, i_site);
         for j_site in (i_site + 1)..num_site {
             let j_room = site2room[j_site];
             if j_room == usize::MAX {
@@ -706,12 +704,17 @@ pub fn remove_site_too_close(site2room: &mut [usize], site2xy: &candle_core::Ten
             if i_room != j_room {
                 continue;
             }
-            let p_j = del_msh_core::vtx2xy::to_navec2(&site2xy, j_site);
+            let p_j = site_vec(&site2xy, j_site);
             if (p_i - p_j).norm() < 0.02 {
                 site2room[j_site] = usize::MAX;
             }
         }
     }
+}
+
+fn site_vec(site2xy: &[f32], i_site: usize) -> nalgebra::Vector2<f32> {
+    let coords = del_msh_core::vtx2xy::to_vec2(site2xy, i_site);
+    nalgebra::Vector2::<f32>::new(coords[0], coords[1])
 }
 
 fn enforce_min_site_distance(coords: &mut [f32], min_distance: f32) {
@@ -909,7 +912,7 @@ fn optimize_iteration(
             &vtxv2xy,
         )?;
         let loss_each_area = room2area.sub(room2area_trg)?.sqr()?.sum_all()?;
-        let total_area_trg = del_msh_core::polyloop2::area_(vtxl2xy);
+        let total_area_trg = del_msh_core::polyloop2::area(vtxl2xy);
         let total_area_trg = candle_core::Tensor::from_vec(
             vec![total_area_trg],
             candle_core::Shape::from(()),

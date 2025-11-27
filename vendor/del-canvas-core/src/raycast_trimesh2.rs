@@ -38,7 +38,7 @@ pub fn draw_vtxcolor<Index, Real>(
             )
             .unwrap();
             let mut res: Vec<(Index, Real, Real)> = vec![];
-            del_msh_core::bvh2::search_including_point::<Real, Index>(
+            del_msh_core::search_bvh2::including_point::<Real, Index>(
                 &mut res,
                 trimesh.tri2vtx,
                 trimesh.vtx2xy,
