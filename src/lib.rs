@@ -926,8 +926,10 @@ fn build_voronoi_geometry(
     #[cfg(debug_assertions)]
     for (i_site, cell) in site2cells.iter().enumerate() {
         if alive[i_site] && cell.vtx2xy.is_empty() {
+            let x = site_coords[i_site * 2];
+            let y = site_coords[i_site * 2 + 1];
             eprintln!(
-                "[floorplan] warning: site {i_site} was marked alive but produced an empty Voronoi cell"
+                "[floorplan] warning: site {i_site} at ({x:.10}, {y:.10}) was marked alive but produced an empty Voronoi cell"
             );
         }
     }
@@ -1550,4 +1552,24 @@ use pyo3::prelude::*;
 #[pymodule]
 fn floorplan(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     python_bindings::register(py, m)
+}
+
+pub fn generate_voronoi_cells_robust(
+    vtxl2xy: &[f32],
+    site2xy: &[f32],
+) -> (Vec<del_msh_core::voronoi2::Cell>, VoronoiInfo) {
+    let site2cells = del_msh_core::voronoi2::voronoi_cells(vtxl2xy, site2xy, |_| true);
+    let voronoi_mesh = del_msh_core::voronoi2::indexing(&site2cells);
+    let idx2site = del_msh_core::elem2elem::from_polygon_mesh(
+        &voronoi_mesh.site2idx,
+        &voronoi_mesh.idx2vtxv,
+        voronoi_mesh.vtxv2xy.len(),
+    );
+    let info = VoronoiInfo {
+        site2idx: voronoi_mesh.site2idx,
+        idx2vtxv: voronoi_mesh.idx2vtxv,
+        idx2site,
+        vtxv2info: voronoi_mesh.vtxv2info,
+    };
+    (site2cells, info)
 }
