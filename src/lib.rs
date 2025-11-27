@@ -136,6 +136,7 @@ fn load_project_params() -> anyhow::Result<Vec<ProjectParams>> {
         }
     }
 
+
     if param_files.is_empty() {
         return Ok(vec![ProjectParams::default()]);
     }
@@ -186,19 +187,35 @@ pub fn my_paint(
 ) {
     let site2idx = &voronoi_info.site2idx;
     let idx2vtxv = &voronoi_info.idx2vtxv;
+    //println!( "\n");
+
+    let mut colors = Vec::<u8>::new();
     //
     for i_site in 0..site2idx.len() - 1 {
         let i_room = site2room[i_site];
         if i_room == usize::MAX {
+            println!("Skipping site {} with no room assignment in my_paint", i_site);
+            //flush
+            std::io::stdout().flush().unwrap();
             continue;
         }
         //
         let i_color: u8 = if i_room == usize::MAX {
+            println!("Coloring site with 1 {} with no room assignment in my_paint", i_site);
+            //flush
+            std::io::stdout().flush().unwrap();
             1
         } else {
             (i_room + 2).try_into().unwrap()
         };
-        //
+
+        colors.push(i_color);
+
+//        println!( "Painting site {} with color {}", i_site, i_color);
+        //flush
+//        std::io::stdout().flush().unwrap();
+
+
         let num_vtx_in_site = site2idx[i_site + 1] - site2idx[i_site];
         if num_vtx_in_site == 0 { continue; }
         let mut vtx2xy= vec!(0f32; num_vtx_in_site * 2);
@@ -229,6 +246,10 @@ pub fn my_paint(
         }
          */
     }
+
+    //println!("Colors: {:?}", colors);
+    //std::io::stdout().flush().unwrap();
+
     // draw points;
     for i_site in 0..site2xy.len() / 2 {
         let i_room = site2room[i_site];
@@ -324,6 +345,9 @@ pub fn my_paint(
         );
         std::process::exit(1);
     }
+
+    std::io::stdout().flush().unwrap();
+
 }
 
 
@@ -1057,6 +1081,37 @@ fn optimize_phase(
         device,
     )?;
 
+    let diag_path = PathBuf::from("target/site_diagnostics.txt");
+    if let Some(parent) = diag_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_existed = diag_path.exists();
+    {
+        use std::fs::OpenOptions;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&diag_path)?;
+        if !file_existed {
+            writeln!(
+                file,
+                "# Site diagnostics\n# sites={} rooms={} iterations={}\n",
+                site2room.len(),
+                room2area_trg.dims2()?.0,
+                iter
+            )?;
+        } else {
+            writeln!(file)?;
+            writeln!(
+                file,
+                "# --- New phase: sites={} rooms={} iterations={} ---",
+                site2room.len(),
+                room2area_trg.dims2()?.0,
+                iter
+            )?;
+        }
+    }
+
     let learning_rates = &params.learning_rates;
     let mut optimizer = candle_nn::AdamW::new(
         vec![site2xy.clone()],
@@ -1104,6 +1159,16 @@ fn optimize_phase(
 
         let site2xy_render = site2xy_adjusted.flatten_all()?.to_vec1::<f32>()?;
         let vtxv2xy_render = vtxv2xy.flatten_all()?.to_vec1::<f32>()?;
+        if let Err(err) = record_site_diagnostics(
+            &diag_path,
+            iter_idx,
+            &site2xy_render,
+            site2room,
+            &voronoi_info,
+            &vtxv2xy_render,
+        ) {
+            eprintln!("[floorplan] failed to write site diagnostics: {err}");
+        }
         canvas_gif.clear(0);
         crate::my_paint(
             canvas_gif,
@@ -1120,6 +1185,211 @@ fn optimize_phase(
 
     println!("Phase elapsed: {:.2?}", phase_timer.elapsed());
     let final_coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
+
+fn record_site_diagnostics(
+    path: &Path,
+    iteration: usize,
+    site2xy: &[f32],
+    site2room: &[usize],
+    voronoi_info: &VoronoiInfo,
+    vtxv2xy: &[f32],
+) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+
+    #[derive(Clone)]
+    struct SiteSnapshot {
+        room: usize,
+        status: &'static str,
+        num_vtx: usize,
+        area: f32,
+        pos_x: f32,
+        pos_y: f32,
+        vertices: Vec<(f32, f32)>,
+        neighbors: Vec<usize>,
+    }
+
+    fn nearest_non_empty(sites: &[SiteSnapshot], idx: usize) -> Option<(usize, f32)> {
+        let target = &sites[idx];
+        if sites.len() <= 1 {
+            return None;
+        }
+        let mut best: Option<(usize, f32)> = None;
+        for (other_idx, other) in sites.iter().enumerate() {
+            if other_idx == idx || other.num_vtx == 0 {
+                continue;
+            }
+            let dx = target.pos_x - other.pos_x;
+            let dy = target.pos_y - other.pos_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if let Some((_, best_dist)) = best {
+                if dist >= best_dist {
+                    continue;
+                }
+            }
+            best = Some((other_idx, dist));
+        }
+        best
+    }
+
+    fn polygon_area(vertices: &[(f32, f32)]) -> f32 {
+        if vertices.len() < 3 {
+            return 0.0;
+        }
+        let mut acc = 0.0f32;
+        for i in 0..vertices.len() {
+            let (x0, y0) = vertices[i];
+            let (x1, y1) = vertices[(i + 1) % vertices.len()];
+            acc += x0 * y1 - x1 * y0;
+        }
+        (acc * 0.5).abs()
+    }
+
+    let mut snapshots: Vec<SiteSnapshot> = Vec::with_capacity(site2room.len());
+    for (i_site, room) in site2room.iter().enumerate() {
+        let alive = *room != usize::MAX;
+        let start = voronoi_info.site2idx[i_site];
+        let end = voronoi_info.site2idx[i_site + 1];
+        let num_vtx = end - start;
+        let mut vertices = Vec::with_capacity(num_vtx);
+        let mut neighbors = Vec::new();
+        for idx in start..end {
+            let i_vtx = voronoi_info.idx2vtxv[idx];
+            vertices.push((
+                vtxv2xy[i_vtx * 2],
+                vtxv2xy[i_vtx * 2 + 1],
+            ));
+            let neighbor_site = voronoi_info.idx2site[idx];
+            if neighbor_site == usize::MAX || neighbor_site == i_site {
+                continue;
+            }
+            if !neighbors.contains(&neighbor_site) {
+                neighbors.push(neighbor_site);
+            }
+        }
+        let area = polygon_area(&vertices);
+        let pos_x = site2xy[i_site * 2];
+        let pos_y = site2xy[i_site * 2 + 1];
+        let status = if !alive {
+            "inactive"
+        } else if num_vtx == 0 {
+            "empty-cell"
+        } else if area.abs() < 1.0e-6 {
+            "zero-area"
+        } else {
+            "ok"
+        };
+        snapshots.push(SiteSnapshot {
+            room: *room,
+            status,
+            num_vtx,
+            area,
+            pos_x,
+            pos_y,
+            vertices,
+            neighbors,
+        });
+    }
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "iteration={iteration}")?;
+    for (i_site, snapshot) in snapshots.iter().enumerate() {
+        writeln!(
+            file,
+            "  site={i_site:04} room={} status={} num_vtx={} area={:.9} pos=({:.9},{:.9})",
+            snapshot.room,
+            snapshot.status,
+            snapshot.num_vtx,
+            snapshot.area,
+            snapshot.pos_x,
+            snapshot.pos_y
+        )?;
+
+        if snapshot.vertices.is_empty() {
+            writeln!(file, "    vertices=[]")?;
+        } else {
+            write!(file, "    vertices=[")?;
+            for (idx, (x, y)) in snapshot.vertices.iter().enumerate() {
+                if idx > 0 {
+                    write!(file, ", ")?;
+                }
+                write!(file, "({:.9},{:.9})", x, y)?;
+            }
+            writeln!(file, "]")?;
+        }
+
+        if matches!(snapshot.status, "empty-cell" | "zero-area") {
+            if let Some((nearest_idx, dist)) = nearest_non_empty(&snapshots, i_site) {
+                let neighbor = &snapshots[nearest_idx];
+                writeln!(
+                    file,
+                    "    nearest_site={:04} room={} status={} distance={:.9} num_vtx={} area={:.9}",
+                    nearest_idx,
+                    neighbor.room,
+                    neighbor.status,
+                    dist,
+                    neighbor.num_vtx,
+                    neighbor.area
+                )?;
+                if neighbor.vertices.is_empty() {
+                    writeln!(file, "      nearest_vertices=[]")?;
+                } else {
+                    write!(file, "      nearest_vertices=[")?;
+                    for (idx, (x, y)) in neighbor.vertices.iter().enumerate() {
+                        if idx > 0 {
+                            write!(file, ", ")?;
+                        }
+                        write!(file, "({:.9},{:.9})", x, y)?;
+                    }
+                    writeln!(file, "]")?;
+                }
+            } else {
+                writeln!(file, "    nearest_site=none")?;
+            }
+
+            if snapshot.neighbors.is_empty() {
+                writeln!(file, "    neighbor_sites=[]")?;
+            } else {
+                writeln!(
+                    file,
+                    "    neighbor_sites=[{}]",
+                    snapshot
+                        .neighbors
+                        .iter()
+                        .map(|idx| format!("{:04}", idx))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )?;
+                for neighbor_idx in &snapshot.neighbors {
+                    let neighbor = &snapshots[*neighbor_idx];
+                    writeln!(
+                        file,
+                        "      neighbor={:04} room={} status={} num_vtx={} area={:.9} pos=({:.9},{:.9})",
+                        neighbor_idx,
+                        neighbor.room,
+                        neighbor.status,
+                        neighbor.num_vtx,
+                        neighbor.area,
+                        neighbor.pos_x,
+                        neighbor.pos_y
+                    )?;
+                    if neighbor.vertices.is_empty() {
+                        writeln!(file, "        vertices=[]")?;
+                    } else {
+                        write!(file, "        vertices=[")?;
+                        for (idx, (x, y)) in neighbor.vertices.iter().enumerate() {
+                            if idx > 0 {
+                                write!(file, ", ")?;
+                            }
+                            write!(file, "({:.9},{:.9})", x, y)?;
+                        }
+                        writeln!(file, "]")?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
     Ok(final_coords)
 }
 
@@ -1148,7 +1418,7 @@ fn optimize_impl(
         0.,
         1.,
     );
-    let mut palette = vec![0xFFFFFF, 0x000000];
+    let mut palette = vec![0x7F7F7F, 0x000000];
     palette.extend(room2color.iter().copied());
 
     //dbg!( canvas_gif.path );

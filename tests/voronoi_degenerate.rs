@@ -35,3 +35,4 @@ fn collinear_sites_still_form_cells() {
     }
     assert!(non_empty >= 3, "expected at least 3 non-empty cells, got {}", non_empty);
 }
+
