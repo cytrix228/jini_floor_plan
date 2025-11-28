@@ -49,7 +49,10 @@ fn main() {
         active_cells.len()
     );
 
-    println!("Voronoi demo succeeded with {} active cells", active_cells.len());
+    println!(
+        "Voronoi demo succeeded with {} active cells",
+        active_cells.len()
+    );
     for (idx, area, num_vertices) in active_cells {
         println!(
             "  site #{idx}: area={area:.4}, vertices={num_vertices}",
@@ -130,8 +133,7 @@ fn write_svg(
         writeln!(
             file,
             "  <circle cx=\"{:.4}\" cy=\"{:.4}\" r=\"0.01\" fill=\"#000\"/>",
-            chunk[0],
-            chunk[1]
+            chunk[0], chunk[1]
         )?;
     }
     writeln!(file, "</svg>")?;

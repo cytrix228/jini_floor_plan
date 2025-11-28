@@ -1,18 +1,18 @@
-use floorplan;
-use del_msh_core;
 use del_canvas_core;
+use del_msh_core;
+use floorplan;
 use nalgebra;
-use rand::SeedableRng;
 use rand::Rng;
+use rand::SeedableRng;
 
 fn get_transform(width: usize, height: usize, vtxl2xy: &[f32], margin: f32) -> [f32; 9] {
     let mut min_x = f32::MAX;
     let mut max_x = f32::MIN;
     let mut min_y = f32::MAX;
     let mut max_y = f32::MIN;
-    for i in 0..vtxl2xy.len()/2 {
-        let x = vtxl2xy[i*2];
-        let y = vtxl2xy[i*2+1];
+    for i in 0..vtxl2xy.len() / 2 {
+        let x = vtxl2xy[i * 2];
+        let y = vtxl2xy[i * 2 + 1];
         min_x = min_x.min(x);
         max_x = max_x.max(x);
         min_y = min_y.min(y);
@@ -23,10 +23,10 @@ fn get_transform(width: usize, height: usize, vtxl2xy: &[f32], margin: f32) -> [
     let w = max_x - min_x;
     let h = max_y - min_y;
     let scale = (width as f32 / w).min(height as f32 / h) / margin;
-    
+
     let tx = -cx * scale + width as f32 * 0.5;
     let ty = -cy * scale + height as f32 * 0.5;
-    
+
     // Column-major: [m11, m21, m31, m12, m22, m32, m13, m23, m33]
     [scale, 0.0, 0.0, 0.0, scale, 0.0, tx, ty, 1.0]
 }
@@ -48,30 +48,27 @@ fn main() -> anyhow::Result<()> {
     1178 -2040 1295 -101 14 -496 27 -571 18z";
     let outline_path = del_msh_core::io_svg::svg_outline_path_from_shape(str_path);
     let loops = del_msh_core::io_svg::svg_loops_from_outline_path(&outline_path);
-    let vtxl2xy = del_msh_core::io_svg::polybezier2polyloop(&loops[0].0, &loops[0].1, loops[0].2, 300.);
+    let vtxl2xy =
+        del_msh_core::io_svg::polybezier2polyloop(&loops[0].0, &loops[0].1, loops[0].2, 300.);
     let vtxl2xy = del_msh_core::vtx2xdim::from_array_of_nalgebra(&vtxl2xy);
     let vtxl2xy = del_msh_core::polyloop::resample::<f32, 2>(&vtxl2xy, 100);
     let vtxl2xy = del_msh_core::vtx2xdim::to_array_of_nalgebra_vector(&vtxl2xy);
-    let vtxl2xy = del_msh_core::vtx2vec::normalize2(
-        &vtxl2xy,
-        &nalgebra::Vector2::<f32>::new(0.5, 0.5),
-        1.0,
-    );
+    let vtxl2xy =
+        del_msh_core::vtx2vec::normalize2(&vtxl2xy, &nalgebra::Vector2::<f32>::new(0.5, 0.5), 1.0);
     let vtxl2xy_flat = del_msh_core::vtx2xdim::from_array_of_nalgebra(&vtxl2xy);
 
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
-    let mut site2xy = del_msh_core::sampling::poisson_disk_sampling_from_polyloop2(
-        &vtxl2xy, 0.05, 30, &mut rng,
-    );
+    let mut site2xy =
+        del_msh_core::sampling::poisson_disk_sampling_from_polyloop2(&vtxl2xy, 0.05, 30, &mut rng);
 
     let mut canvas = del_canvas_core::canvas_gif::Canvas::new(
         "target/demo_voronoi.gif",
         (400, 400),
         vec![
             255, 255, 255, // 0: White
-            0, 0, 0,       // 1: Black
-            0, 0, 255,     // 2: Blue
-            255, 0, 0      // 3: Red
+            0, 0, 0, // 1: Black
+            0, 0, 255, // 2: Blue
+            255, 0, 0, // 3: Red
         ],
     )?;
 
@@ -79,51 +76,65 @@ fn main() -> anyhow::Result<()> {
 
     for _i_frame in 0..50 {
         // Random walk sites
-        for i in 0..site2xy.len()/2 {
-            site2xy[i*2] += (rng.gen::<f32>() - 0.5) * 0.01;
-            site2xy[i*2+1] += (rng.gen::<f32>() - 0.5) * 0.01;
+        for i in 0..site2xy.len() / 2 {
+            site2xy[i * 2] += (rng.gen::<f32>() - 0.5) * 0.01;
+            site2xy[i * 2 + 1] += (rng.gen::<f32>() - 0.5) * 0.01;
         }
 
         let cells = floorplan::compute_voronoi_cells_with_logging(&vtxl2xy_flat, &site2xy);
 
         canvas.clear(0); // Clear to background color (index 0 in palette? No, clear takes color index)
-        // Wait, Canvas::new takes palette. 
-        // del_canvas_core::canvas_gif::Canvas::new(path, size, palette)
-        // palette is Vec<u8>. RGBRGB...
-        // If I pass vec![255, 255, 255], index 0 is white.
-        
+                         // Wait, Canvas::new takes palette.
+                         // del_canvas_core::canvas_gif::Canvas::new(path, size, palette)
+                         // palette is Vec<u8>. RGBRGB...
+                         // If I pass vec![255, 255, 255], index 0 is white.
+
         // Draw boundary
         for i in 0..vtxl2xy.len() {
             let p0 = &vtxl2xy[i];
-            let p1 = &vtxl2xy[(i+1)%vtxl2xy.len()];
+            let p1 = &vtxl2xy[(i + 1) % vtxl2xy.len()];
             del_canvas_core::rasterize_line::draw_dda_with_transformation(
-                &mut canvas.data, canvas.width,
-                &[p0.x, p0.y], &[p1.x, p1.y],
-                &transform, 1 // Color 1? I need more colors in palette.
+                &mut canvas.data,
+                canvas.width,
+                &[p0.x, p0.y],
+                &[p1.x, p1.y],
+                &transform,
+                1, // Color 1? I need more colors in palette.
             );
         }
 
         // Draw cells
         for cell in cells {
-            if cell.vtx2xy.is_empty() { continue; }
+            if cell.vtx2xy.is_empty() {
+                continue;
+            }
             let num_vtx = cell.vtx2xy.len() / 2;
             for i in 0..num_vtx {
-                let p0 = &[cell.vtx2xy[i*2], cell.vtx2xy[i*2+1]];
-                let p1 = &[cell.vtx2xy[((i+1)%num_vtx)*2], cell.vtx2xy[((i+1)%num_vtx)*2+1]];
+                let p0 = &[cell.vtx2xy[i * 2], cell.vtx2xy[i * 2 + 1]];
+                let p1 = &[
+                    cell.vtx2xy[((i + 1) % num_vtx) * 2],
+                    cell.vtx2xy[((i + 1) % num_vtx) * 2 + 1],
+                ];
                 del_canvas_core::rasterize_line::draw_dda_with_transformation(
-                    &mut canvas.data, canvas.width,
-                    p0, p1,
-                    &transform, 2 
+                    &mut canvas.data,
+                    canvas.width,
+                    p0,
+                    p1,
+                    &transform,
+                    2,
                 );
             }
         }
 
         // Draw sites
-        for i in 0..site2xy.len()/2 {
+        for i in 0..site2xy.len() / 2 {
             del_canvas_core::rasterize_circle::fill(
-                &mut canvas.data, canvas.width,
-                &[site2xy[i*2], site2xy[i*2+1]],
-                &transform, 2.0, 3
+                &mut canvas.data,
+                canvas.width,
+                &[site2xy[i * 2], site2xy[i * 2 + 1]],
+                &transform,
+                2.0,
+                3,
             );
         }
 

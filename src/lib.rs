@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 pub mod loss_topo;
+mod voronoi;
+pub use voronoi::VoronoiBackend;
 
 static PROJECT_PARAMS: OnceLock<Vec<ProjectParams>> = OnceLock::new();
 
@@ -136,7 +138,6 @@ fn load_project_params() -> anyhow::Result<Vec<ProjectParams>> {
         }
     }
 
-
     if param_files.is_empty() {
         return Ok(vec![ProjectParams::default()]);
     }
@@ -194,14 +195,20 @@ pub fn my_paint(
     for i_site in 0..site2idx.len() - 1 {
         let i_room = site2room[i_site];
         if i_room == usize::MAX {
-            println!("Skipping site {} with no room assignment in my_paint", i_site);
+            println!(
+                "Skipping site {} with no room assignment in my_paint",
+                i_site
+            );
             //flush
             std::io::stdout().flush().unwrap();
             continue;
         }
         //
         let i_color: u8 = if i_room == usize::MAX {
-            println!("Coloring site with 1 {} with no room assignment in my_paint", i_site);
+            println!(
+                "Coloring site with 1 {} with no room assignment in my_paint",
+                i_site
+            );
             //flush
             std::io::stdout().flush().unwrap();
             1
@@ -211,22 +218,27 @@ pub fn my_paint(
 
         colors.push(i_color);
 
-//        println!( "Painting site {} with color {}", i_site, i_color);
+        //        println!( "Painting site {} with color {}", i_site, i_color);
         //flush
-//        std::io::stdout().flush().unwrap();
-
+        //        std::io::stdout().flush().unwrap();
 
         let num_vtx_in_site = site2idx[i_site + 1] - site2idx[i_site];
-        if num_vtx_in_site == 0 { continue; }
-        let mut vtx2xy= vec!(0f32; num_vtx_in_site * 2);
+        if num_vtx_in_site == 0 {
+            continue;
+        }
+        let mut vtx2xy = vec![0f32; num_vtx_in_site * 2];
         for i_vtx in 0..num_vtx_in_site {
             let i_vtxv = idx2vtxv[site2idx[i_site] + i_vtx];
-            vtx2xy[i_vtx*2+0] = vtxv2xy[i_vtxv*2+0];
-            vtx2xy[i_vtx*2+1] = vtxv2xy[i_vtxv*2+1];
+            vtx2xy[i_vtx * 2 + 0] = vtxv2xy[i_vtxv * 2 + 0];
+            vtx2xy[i_vtx * 2 + 1] = vtxv2xy[i_vtxv * 2 + 1];
         }
         del_canvas_core::rasterize_polygon::fill(
-            &mut canvas.data, canvas.width,
-            &vtx2xy,  arrayref::array_ref![transform_to_scr.as_slice(),0,9], i_color);
+            &mut canvas.data,
+            canvas.width,
+            &vtx2xy,
+            arrayref::array_ref![transform_to_scr.as_slice(), 0, 9],
+            i_color,
+        );
         /*
         for i0_vtx in 0..num_vtx_in_site-2 {
             let i1_vtx = (i0_vtx + 1) % num_vtx_in_site;
@@ -265,13 +277,10 @@ pub fn my_paint(
             &mut canvas.data,
             canvas.width,
             &[site2xy[i_site * 2 + 0], site2xy[i_site * 2 + 1]],
-            arrayref::array_ref![transform_to_scr.as_slice(),0,9],
+            arrayref::array_ref![transform_to_scr.as_slice(), 0, 9],
             2.0,
-            
             // black dot
-            255
-
-            //i_color,
+            255, //i_color,
         );
     }
 
@@ -293,7 +302,7 @@ pub fn my_paint(
                     canvas.width,
                     p0,
                     p1,
-                    arrayref::array_ref![transform_to_scr.as_slice(),0,9],
+                    arrayref::array_ref![transform_to_scr.as_slice(), 0, 9],
                     1,
                 );
             })) {
@@ -347,9 +356,7 @@ pub fn my_paint(
     }
 
     std::io::stdout().flush().unwrap();
-
 }
-
 
 pub fn draw_svg(
     file_path: String,
@@ -909,49 +916,69 @@ fn build_voronoi_geometry(
     vtxl2xy: &[f32],
     site2xy: &candle_core::Tensor,
     site2room: &[usize],
+    backend: VoronoiBackend,
 ) -> anyhow::Result<(candle_core::Tensor, VoronoiInfo)> {
     let alive: Vec<bool> = site2room.iter().map(|room| *room != usize::MAX).collect();
     let site_coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
-    let site2cells = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        del_msh_core::voronoi2::voronoi_cells(vtxl2xy, &site_coords, |i_site| alive[i_site])
-    }))
-    .map_err(|payload| {
-        let message = panic_payload_to_string(payload.as_ref());
-        let backtrace = Backtrace::force_capture();
-        anyhow::anyhow!(
-            "voronoi_cells() panicked while building geometry: {message}\nBacktrace:\n{backtrace}"
-        )
-    })?;
+    match backend {
+        VoronoiBackend::Legacy => {
+            let site2cells = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                del_msh_core::voronoi2::voronoi_cells(vtxl2xy, &site_coords, |i_site| alive[i_site])
+            }))
+            .map_err(|payload| {
+                let message = panic_payload_to_string(payload.as_ref());
+                let backtrace = Backtrace::force_capture();
+                anyhow::anyhow!(
+                    "voronoi_cells() panicked while building geometry: {message}\nBacktrace:\n{backtrace}"
+                )
+            })?;
 
-    #[cfg(debug_assertions)]
-    for (i_site, cell) in site2cells.iter().enumerate() {
-        if alive[i_site] && cell.vtx2xy.is_empty() {
-            let x = site_coords[i_site * 2];
-            let y = site_coords[i_site * 2 + 1];
-            eprintln!(
-                "[floorplan] warning: site {i_site} at ({x:.10}, {y:.10}) was marked alive but produced an empty Voronoi cell"
+            #[cfg(debug_assertions)]
+            for (i_site, cell) in site2cells.iter().enumerate() {
+                if alive[i_site] && cell.vtx2xy.is_empty() {
+                    let x = site_coords[i_site * 2];
+                    let y = site_coords[i_site * 2 + 1];
+                    eprintln!(
+                        "[floorplan] warning: site {i_site} at ({x:.10}, {y:.10}) was marked alive but produced an empty Voronoi cell"
+                    );
+                }
+            }
+
+            let voronoi_mesh = del_msh_core::voronoi2::indexing(&site2cells);
+            let layer = Layer {
+                vtxl2xy: vtxl2xy.to_vec(),
+                vtxv2info: voronoi_mesh.vtxv2info.clone(),
+            };
+            let vtxv2xy = site2xy.apply_op1(layer)?;
+            let idx2site = del_msh_core::elem2elem::from_polygon_mesh(
+                &voronoi_mesh.site2idx,
+                &voronoi_mesh.idx2vtxv,
+                vtxv2xy.dims2()?.0,
             );
+            let info = VoronoiInfo {
+                site2idx: voronoi_mesh.site2idx,
+                idx2vtxv: voronoi_mesh.idx2vtxv,
+                idx2site,
+                vtxv2info: voronoi_mesh.vtxv2info,
+            };
+            Ok((vtxv2xy, info))
+        }
+        VoronoiBackend::Delaunay => {
+            let diagram = crate::voronoi::compute_delaunay_voronoi(vtxl2xy, &site_coords, &alive)?;
+            let layer = Layer {
+                vtxl2xy: vtxl2xy.to_vec(),
+                vtxv2info: diagram.vtxv2info.clone(),
+            };
+            let vtxv2xy = site2xy.apply_op1(layer)?;
+            let info = VoronoiInfo {
+                site2idx: diagram.site2idx,
+                idx2vtxv: diagram.idx2vtxv,
+                idx2site: diagram.idx2site,
+                vtxv2info: diagram.vtxv2info,
+            };
+            Ok((vtxv2xy, info))
         }
     }
-
-    let voronoi_mesh = del_msh_core::voronoi2::indexing(&site2cells);
-    let layer = Layer {
-        vtxl2xy: vtxl2xy.to_vec(),
-        vtxv2info: voronoi_mesh.vtxv2info.clone(),
-    };
-    let vtxv2xy = site2xy.apply_op1(layer)?;
-    let idx2site = del_msh_core::elem2elem::from_polygon_mesh(
-        &voronoi_mesh.site2idx,
-        &voronoi_mesh.idx2vtxv,
-        vtxv2xy.dims2()?.0,
-    );
-    let info = VoronoiInfo {
-        site2idx: voronoi_mesh.site2idx,
-        idx2vtxv: voronoi_mesh.idx2vtxv,
-        idx2site,
-        vtxv2info: voronoi_mesh.vtxv2info,
-    };
-    Ok((vtxv2xy, info))
 }
 
 fn optimize_iteration(
@@ -988,9 +1015,13 @@ fn optimize_iteration(
         }
     }
 
-
     // println!("Check point time: {:?} at voronoi", std::time::Instant::now());
-    let (vtxv2xy, voronoi_info) = build_voronoi_geometry(vtxl2xy, &site2xy_adjusted, site2room)?;
+    let (vtxv2xy, voronoi_info) = build_voronoi_geometry(
+        vtxl2xy,
+        &site2xy_adjusted,
+        site2room,
+        VoronoiBackend::Delaunay,
+    )?;
     let edge2vtxv_wall = crate::edge2vtvx_wall(&voronoi_info, site2room);
     let (loss_each_area, loss_total_area) = {
         let room2area = crate::room2area(
@@ -1126,13 +1157,12 @@ fn optimize_phase(
     let phase_timer = Instant::now();
     let mut persent_last = 0;
     for iter_idx in 0..iter {
-
         let persent = ((iter_idx + 1) * 100) / iter;
         if persent != persent_last {
             persent_last = persent;
             print!("{}% ", persent);
             let mut stdout = std::io::stdout().lock();
-            stdout.flush()?;  
+            stdout.flush()?;
         }
 
         if iter_idx == 150 {
@@ -1188,141 +1218,138 @@ fn optimize_phase(
     println!("Phase elapsed: {:.2?}", phase_timer.elapsed());
     let final_coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
 
-fn record_site_diagnostics(
-    path: &Path,
-    iteration: usize,
-    site2xy: &[f32],
-    site2room: &[usize],
-    voronoi_info: &VoronoiInfo,
-    vtxv2xy: &[f32],
-) -> std::io::Result<()> {
-    use std::fs::OpenOptions;
+    fn record_site_diagnostics(
+        path: &Path,
+        iteration: usize,
+        site2xy: &[f32],
+        site2room: &[usize],
+        voronoi_info: &VoronoiInfo,
+        vtxv2xy: &[f32],
+    ) -> std::io::Result<()> {
+        use std::fs::OpenOptions;
 
-    #[derive(Clone)]
-    struct SiteSnapshot {
-        room: usize,
-        status: &'static str,
-        num_vtx: usize,
-        area: f32,
-        pos_x: f32,
-        pos_y: f32,
-        vertices: Vec<(f32, f32)>,
-        neighbors: Vec<usize>,
-    }
-
-    fn nearest_non_empty(sites: &[SiteSnapshot], idx: usize) -> Option<(usize, f32)> {
-        let target = &sites[idx];
-        if sites.len() <= 1 {
-            return None;
+        #[derive(Clone)]
+        struct SiteSnapshot {
+            room: usize,
+            status: &'static str,
+            num_vtx: usize,
+            area: f32,
+            pos_x: f32,
+            pos_y: f32,
+            vertices: Vec<(f32, f32)>,
+            neighbors: Vec<usize>,
         }
-        let mut best: Option<(usize, f32)> = None;
-        for (other_idx, other) in sites.iter().enumerate() {
-            if other_idx == idx || other.num_vtx == 0 {
-                continue;
+
+        fn nearest_non_empty(sites: &[SiteSnapshot], idx: usize) -> Option<(usize, f32)> {
+            let target = &sites[idx];
+            if sites.len() <= 1 {
+                return None;
             }
-            let dx = target.pos_x - other.pos_x;
-            let dy = target.pos_y - other.pos_y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            if let Some((_, best_dist)) = best {
-                if dist >= best_dist {
+            let mut best: Option<(usize, f32)> = None;
+            for (other_idx, other) in sites.iter().enumerate() {
+                if other_idx == idx || other.num_vtx == 0 {
                     continue;
                 }
-            }
-            best = Some((other_idx, dist));
-        }
-        best
-    }
-
-    fn polygon_area(vertices: &[(f32, f32)]) -> f32 {
-        if vertices.len() < 3 {
-            return 0.0;
-        }
-        let mut acc = 0.0f32;
-        for i in 0..vertices.len() {
-            let (x0, y0) = vertices[i];
-            let (x1, y1) = vertices[(i + 1) % vertices.len()];
-            acc += x0 * y1 - x1 * y0;
-        }
-        (acc * 0.5).abs()
-    }
-
-    let mut snapshots: Vec<SiteSnapshot> = Vec::with_capacity(site2room.len());
-    for (i_site, room) in site2room.iter().enumerate() {
-        let alive = *room != usize::MAX;
-        let start = voronoi_info.site2idx[i_site];
-        let end = voronoi_info.site2idx[i_site + 1];
-        let num_vtx = end - start;
-        let mut vertices = Vec::with_capacity(num_vtx);
-        let mut neighbors = Vec::new();
-        for idx in start..end {
-            let i_vtx = voronoi_info.idx2vtxv[idx];
-            vertices.push((
-                vtxv2xy[i_vtx * 2],
-                vtxv2xy[i_vtx * 2 + 1],
-            ));
-            let neighbor_site = voronoi_info.idx2site[idx];
-            if neighbor_site == usize::MAX || neighbor_site == i_site {
-                continue;
-            }
-            if !neighbors.contains(&neighbor_site) {
-                neighbors.push(neighbor_site);
-            }
-        }
-        let area = polygon_area(&vertices);
-        let pos_x = site2xy[i_site * 2];
-        let pos_y = site2xy[i_site * 2 + 1];
-        let status = if !alive {
-            "inactive"
-        } else if num_vtx == 0 {
-            "empty-cell"
-        } else if area.abs() < 1.0e-6 {
-            "zero-area"
-        } else {
-            "ok"
-        };
-        snapshots.push(SiteSnapshot {
-            room: *room,
-            status,
-            num_vtx,
-            area,
-            pos_x,
-            pos_y,
-            vertices,
-            neighbors,
-        });
-    }
-
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(file, "iteration={iteration}")?;
-    for (i_site, snapshot) in snapshots.iter().enumerate() {
-        writeln!(
-            file,
-            "  site={i_site:04} room={} status={} num_vtx={} area={:.9} pos=({:.9},{:.9})",
-            snapshot.room,
-            snapshot.status,
-            snapshot.num_vtx,
-            snapshot.area,
-            snapshot.pos_x,
-            snapshot.pos_y
-        )?;
-
-        if snapshot.vertices.is_empty() {
-            writeln!(file, "    vertices=[]")?;
-        } else {
-            write!(file, "    vertices=[")?;
-            for (idx, (x, y)) in snapshot.vertices.iter().enumerate() {
-                if idx > 0 {
-                    write!(file, ", ")?;
+                let dx = target.pos_x - other.pos_x;
+                let dy = target.pos_y - other.pos_y;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if let Some((_, best_dist)) = best {
+                    if dist >= best_dist {
+                        continue;
+                    }
                 }
-                write!(file, "({:.9},{:.9})", x, y)?;
+                best = Some((other_idx, dist));
             }
-            writeln!(file, "]")?;
+            best
         }
 
-        if matches!(snapshot.status, "empty-cell" | "zero-area") {
-            if let Some((nearest_idx, dist)) = nearest_non_empty(&snapshots, i_site) {
-                let neighbor = &snapshots[nearest_idx];
-                writeln!(
+        fn polygon_area(vertices: &[(f32, f32)]) -> f32 {
+            if vertices.len() < 3 {
+                return 0.0;
+            }
+            let mut acc = 0.0f32;
+            for i in 0..vertices.len() {
+                let (x0, y0) = vertices[i];
+                let (x1, y1) = vertices[(i + 1) % vertices.len()];
+                acc += x0 * y1 - x1 * y0;
+            }
+            (acc * 0.5).abs()
+        }
+
+        let mut snapshots: Vec<SiteSnapshot> = Vec::with_capacity(site2room.len());
+        for (i_site, room) in site2room.iter().enumerate() {
+            let alive = *room != usize::MAX;
+            let start = voronoi_info.site2idx[i_site];
+            let end = voronoi_info.site2idx[i_site + 1];
+            let num_vtx = end - start;
+            let mut vertices = Vec::with_capacity(num_vtx);
+            let mut neighbors = Vec::new();
+            for idx in start..end {
+                let i_vtx = voronoi_info.idx2vtxv[idx];
+                vertices.push((vtxv2xy[i_vtx * 2], vtxv2xy[i_vtx * 2 + 1]));
+                let neighbor_site = voronoi_info.idx2site[idx];
+                if neighbor_site == usize::MAX || neighbor_site == i_site {
+                    continue;
+                }
+                if !neighbors.contains(&neighbor_site) {
+                    neighbors.push(neighbor_site);
+                }
+            }
+            let area = polygon_area(&vertices);
+            let pos_x = site2xy[i_site * 2];
+            let pos_y = site2xy[i_site * 2 + 1];
+            let status = if !alive {
+                "inactive"
+            } else if num_vtx == 0 {
+                "empty-cell"
+            } else if area.abs() < 1.0e-6 {
+                "zero-area"
+            } else {
+                "ok"
+            };
+            snapshots.push(SiteSnapshot {
+                room: *room,
+                status,
+                num_vtx,
+                area,
+                pos_x,
+                pos_y,
+                vertices,
+                neighbors,
+            });
+        }
+
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(file, "iteration={iteration}")?;
+        for (i_site, snapshot) in snapshots.iter().enumerate() {
+            writeln!(
+                file,
+                "  site={i_site:04} room={} status={} num_vtx={} area={:.9} pos=({:.9},{:.9})",
+                snapshot.room,
+                snapshot.status,
+                snapshot.num_vtx,
+                snapshot.area,
+                snapshot.pos_x,
+                snapshot.pos_y
+            )?;
+
+            if snapshot.vertices.is_empty() {
+                writeln!(file, "    vertices=[]")?;
+            } else {
+                write!(file, "    vertices=[")?;
+                for (idx, (x, y)) in snapshot.vertices.iter().enumerate() {
+                    if idx > 0 {
+                        write!(file, ", ")?;
+                    }
+                    write!(file, "({:.9},{:.9})", x, y)?;
+                }
+                writeln!(file, "]")?;
+            }
+
+            if matches!(snapshot.status, "empty-cell" | "zero-area") {
+                if let Some((nearest_idx, dist)) = nearest_non_empty(&snapshots, i_site) {
+                    let neighbor = &snapshots[nearest_idx];
+                    writeln!(
                     file,
                     "    nearest_site={:04} room={} status={} distance={:.9} num_vtx={} area={:.9}",
                     nearest_idx,
@@ -1332,38 +1359,38 @@ fn record_site_diagnostics(
                     neighbor.num_vtx,
                     neighbor.area
                 )?;
-                if neighbor.vertices.is_empty() {
-                    writeln!(file, "      nearest_vertices=[]")?;
-                } else {
-                    write!(file, "      nearest_vertices=[")?;
-                    for (idx, (x, y)) in neighbor.vertices.iter().enumerate() {
-                        if idx > 0 {
-                            write!(file, ", ")?;
+                    if neighbor.vertices.is_empty() {
+                        writeln!(file, "      nearest_vertices=[]")?;
+                    } else {
+                        write!(file, "      nearest_vertices=[")?;
+                        for (idx, (x, y)) in neighbor.vertices.iter().enumerate() {
+                            if idx > 0 {
+                                write!(file, ", ")?;
+                            }
+                            write!(file, "({:.9},{:.9})", x, y)?;
                         }
-                        write!(file, "({:.9},{:.9})", x, y)?;
+                        writeln!(file, "]")?;
                     }
-                    writeln!(file, "]")?;
+                } else {
+                    writeln!(file, "    nearest_site=none")?;
                 }
-            } else {
-                writeln!(file, "    nearest_site=none")?;
-            }
 
-            if snapshot.neighbors.is_empty() {
-                writeln!(file, "    neighbor_sites=[]")?;
-            } else {
-                writeln!(
-                    file,
-                    "    neighbor_sites=[{}]",
-                    snapshot
-                        .neighbors
-                        .iter()
-                        .map(|idx| format!("{:04}", idx))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )?;
-                for neighbor_idx in &snapshot.neighbors {
-                    let neighbor = &snapshots[*neighbor_idx];
+                if snapshot.neighbors.is_empty() {
+                    writeln!(file, "    neighbor_sites=[]")?;
+                } else {
                     writeln!(
+                        file,
+                        "    neighbor_sites=[{}]",
+                        snapshot
+                            .neighbors
+                            .iter()
+                            .map(|idx| format!("{:04}", idx))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )?;
+                    for neighbor_idx in &snapshot.neighbors {
+                        let neighbor = &snapshots[*neighbor_idx];
+                        writeln!(
                         file,
                         "      neighbor={:04} room={} status={} num_vtx={} area={:.9} pos=({:.9},{:.9})",
                         neighbor_idx,
@@ -1374,24 +1401,24 @@ fn record_site_diagnostics(
                         neighbor.pos_x,
                         neighbor.pos_y
                     )?;
-                    if neighbor.vertices.is_empty() {
-                        writeln!(file, "        vertices=[]")?;
-                    } else {
-                        write!(file, "        vertices=[")?;
-                        for (idx, (x, y)) in neighbor.vertices.iter().enumerate() {
-                            if idx > 0 {
-                                write!(file, ", ")?;
+                        if neighbor.vertices.is_empty() {
+                            writeln!(file, "        vertices=[]")?;
+                        } else {
+                            write!(file, "        vertices=[")?;
+                            for (idx, (x, y)) in neighbor.vertices.iter().enumerate() {
+                                if idx > 0 {
+                                    write!(file, ", ")?;
+                                }
+                                write!(file, "({:.9},{:.9})", x, y)?;
                             }
-                            write!(file, "({:.9},{:.9})", x, y)?;
+                            writeln!(file, "]")?;
                         }
-                        writeln!(file, "]")?;
                     }
                 }
             }
         }
+        Ok(())
     }
-    Ok(())
-}
     Ok(final_coords)
 }
 

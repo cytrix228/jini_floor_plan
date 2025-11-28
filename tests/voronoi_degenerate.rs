@@ -18,12 +18,7 @@ fn polygon_area(coords: &[f32]) -> f32 {
 #[test]
 fn collinear_sites_still_form_cells() {
     let boundary = vec![0.0f32, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
-    let sites = vec![
-        0.2, 0.5,
-        0.5, 0.5,
-        0.8, 0.5,
-        0.5, 0.2,
-    ];
+    let sites = vec![0.2, 0.5, 0.5, 0.5, 0.8, 0.5, 0.5, 0.2];
     let cells = del_msh_core::voronoi2::voronoi_cells(&boundary, &sites, |_| true);
     let mut non_empty = 0;
     for cell in cells.iter() {
@@ -33,6 +28,9 @@ fn collinear_sites_still_form_cells() {
         non_empty += 1;
         assert!(polygon_area(&cell.vtx2xy) > 1.0e-6);
     }
-    assert!(non_empty >= 3, "expected at least 3 non-empty cells, got {}", non_empty);
+    assert!(
+        non_empty >= 3,
+        "expected at least 3 non-empty cells, got {}",
+        non_empty
+    );
 }
-

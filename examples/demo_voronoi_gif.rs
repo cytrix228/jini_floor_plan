@@ -1,6 +1,6 @@
 use del_canvas_core::canvas_gif::Canvas;
-use rand::SeedableRng;
 use rand::Rng;
+use rand::SeedableRng;
 
 fn centroid(vtx2xy: &[f32]) -> [f32; 2] {
     let mut cx = 0.0;
@@ -32,18 +32,14 @@ fn is_inside(vtx2xy: &[f32], p: &[f32; 2]) -> bool {
     (wn - 1.0).abs() < 0.1
 }
 
-fn random_sampling_in_polyloop(
-    vtx2xy: &[f32],
-    num_samples: usize,
-    rng: &mut impl Rng,
-) -> Vec<f32> {
+fn random_sampling_in_polyloop(vtx2xy: &[f32], num_samples: usize, rng: &mut impl Rng) -> Vec<f32> {
     let mut samples = Vec::with_capacity(num_samples * 2);
     let aabb = del_msh_core::vtx2xy::aabb2(vtx2xy);
     let min = [aabb[0], aabb[1]];
     let max = [aabb[2], aabb[3]];
     let w = max[0] - min[0];
     let h = max[1] - min[1];
-    
+
     while samples.len() < num_samples * 2 {
         let x = min[0] + rng.gen::<f32>() * w;
         let y = min[1] + rng.gen::<f32>() * h;
@@ -70,27 +66,34 @@ fn main() -> anyhow::Result<()> {
     27 167 24 487 -6 660 -33 189 -64 249 -150 289 -46 21 -51 21 -846 21 -440 0 \
     -828 -3 -861 -7 l-62 -7 -32 86 c-54 143 -194 412 -289 554 -479 720 -1201 \
     1178 -2040 1295 -101 14 -496 27 -571 18z";
-    
+
     let outline_path = del_msh_core::io_svg::svg_outline_path_from_shape(str_path);
     let loops = del_msh_core::io_svg::svg_loops_from_outline_path(&outline_path);
-    let vtxl2xy_nalgebra = del_msh_core::io_svg::polybezier2polyloop(&loops[0].0, &loops[0].1, loops[0].2, 300.);
-    
+    let vtxl2xy_nalgebra =
+        del_msh_core::io_svg::polybezier2polyloop(&loops[0].0, &loops[0].1, loops[0].2, 300.);
+
     let mut vtxl2xy_flat = Vec::new();
     for p in &vtxl2xy_nalgebra {
         vtxl2xy_flat.push(p[0]);
         vtxl2xy_flat.push(p[1]);
     }
-    
+
     let vtxl2xy_flat = del_msh_core::polyloop::resample::<f32, 2>(&vtxl2xy_flat, 100);
-    
+
     let aabb = del_msh_core::vtx2xy::aabb2(&vtxl2xy_flat);
     let min = [aabb[0], aabb[1]];
     let max = [aabb[2], aabb[3]];
     let scale = 1.0 / (max[0] - min[0]).max(max[1] - min[1]);
     let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
-    let vtxl2xy_flat: Vec<f32> = vtxl2xy_flat.chunks(2).flat_map(|v| {
-        [(v[0] - center[0]) * scale + 0.5, (v[1] - center[1]) * scale + 0.5]
-    }).collect();
+    let vtxl2xy_flat: Vec<f32> = vtxl2xy_flat
+        .chunks(2)
+        .flat_map(|v| {
+            [
+                (v[0] - center[0]) * scale + 0.5,
+                (v[1] - center[1]) * scale + 0.5,
+            ]
+        })
+        .collect();
 
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
     let mut site2xy = random_sampling_in_polyloop(&vtxl2xy_flat, 30, &mut rng);
@@ -102,19 +105,16 @@ fn main() -> anyhow::Result<()> {
         &palette,
     );
 
-    let transform_mat = nalgebra::Matrix3::<f32>::new(
-        500.0, 0.0, 50.0,
-        0.0, 500.0, 50.0,
-        0.0, 0.0, 1.0,
-    );
+    let transform_mat =
+        nalgebra::Matrix3::<f32>::new(500.0, 0.0, 50.0, 0.0, 500.0, 50.0, 0.0, 0.0, 1.0);
     let transform_slice = transform_mat.as_slice();
     let transform: [f32; 9] = transform_slice.try_into().unwrap();
 
     for _iter in 0..50 {
         let (cells, _info) = floorplan::generate_voronoi_cells_robust(&vtxl2xy_flat, &site2xy);
-        
+
         canvas.clear(0);
-        
+
         // Draw boundary (Black)
         del_canvas_core::rasterize_polygon::stroke(
             &mut canvas.data,
@@ -127,7 +127,9 @@ fn main() -> anyhow::Result<()> {
 
         // Draw Voronoi cells (Red)
         for cell in &cells {
-            if cell.vtx2xy.is_empty() { continue; }
+            if cell.vtx2xy.is_empty() {
+                continue;
+            }
             del_canvas_core::rasterize_polygon::stroke(
                 &mut canvas.data,
                 600,
@@ -140,15 +142,15 @@ fn main() -> anyhow::Result<()> {
 
         // Draw sites (Blue)
         for site in site2xy.chunks(2) {
-             let p = [site[0], site[1]];
-             del_canvas_core::rasterize_circle::fill(
-                 &mut canvas.data,
-                 600,
-                 &p,
-                 &transform,
-                 3.0,
-                 2u8,
-             );
+            let p = [site[0], site[1]];
+            del_canvas_core::rasterize_circle::fill(
+                &mut canvas.data,
+                600,
+                &p,
+                &transform,
+                3.0,
+                2u8,
+            );
         }
 
         canvas.write();
