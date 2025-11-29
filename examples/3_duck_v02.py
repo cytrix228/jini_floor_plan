@@ -1,4 +1,4 @@
-"""Python port of examples/3_duck.rs using the PyTorch optimize() shim."""
+"""Python port of examples/3_duck.rs using the native Python optimizer."""
 from __future__ import annotations
 
 import math
@@ -10,8 +10,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+PYTHON_LIB_DIR = REPO_ROOT / "python"
+if str(PYTHON_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(PYTHON_LIB_DIR))
+
 import floorplan as fp
-from optimize.optimize import load_params, optimize as torch_optimize
+from floorplan_optimizer import optimize as python_optimize
 
 try:
     from svgpathtools import parse_path
@@ -181,15 +185,12 @@ def problem(
 def main(config: Dict[str, Any] | None = None) -> None:
     config = config or load_optimize_config()
     iterations = int(config["iterations"])
-    render_interval = int(config["render_interval"])
     seed = int(config["seed"])
     loop_samples = int(config["loop_samples"])
     resample_target = int(config["resample_target"])
     poisson_radius = float(config["poisson_radius"])
     poisson_k = int(config["poisson_k"])
-    grad_method = str(config.get("grad_method", "central"))
-    spsa_samples = int(config.get("spsa_samples", 2))
-    grad_epsilon = float(config.get("grad_epsilon", 1.0e-3))
+    params_index = int(config.get("params_index", 0))
     write_duck_path_svg(Path("duck_path.svg"))
     (
         vtxl2xy,
@@ -210,7 +211,8 @@ def main(config: Dict[str, Any] | None = None) -> None:
     target_dir = Path("target")
     target_dir.mkdir(exist_ok=True)
     canvas = fp.CanvasGif(str(target_dir / "3_duck_v02.gif"), 1024, 1024, palette)
-    _ = torch_optimize(
+    python_optimize(
+        canvas,
         vtxl2xy,
         site2xy,
         site2room,
@@ -218,29 +220,20 @@ def main(config: Dict[str, Any] | None = None) -> None:
         room2area_trg,
         room2color,
         room_connections,
-        iterations=iterations,
-        canvas=canvas,
-        render_interval=render_interval,
-        params=load_params(),
-        grad_method=grad_method,
-        spsa_samples=spsa_samples,
-        grad_epsilon=grad_epsilon,
-        nn_scale=0.0001
+        iterations,
+        params_index=params_index,
     )
 
 
 def load_optimize_config() -> Dict[str, Any]:
     defaults: Dict[str, Any] = {
         "iterations": 1000,
-        "render_interval": 1,
         "seed": 0,
         "loop_samples": 400,
         "resample_target": 100,
         "poisson_radius": 0.03,
         "poisson_k": 50,
-        "grad_method": "central",
-        "spsa_samples": 2,
-        "grad_epsilon": 2.5e-4,
+        "params_index": 0,
     }
     config_path = Path(__file__).resolve().parents[1] / "optimize" / "optimize.toml"
     if not config_path.exists():

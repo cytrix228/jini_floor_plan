@@ -1,7 +1,8 @@
 #![cfg(feature = "python-bindings")]
 
-use crate::loss_topo;
+use crate::{loss_topo, project_params_all, ProjectParams, VoronoiStage};
 use candle_core::{Device, Shape, Tensor, Var};
+use candle_nn::{self, Optimizer};
 use del_candle::voronoi2::VoronoiInfo;
 use nalgebra::Matrix3;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -100,11 +101,251 @@ impl PyVoronoiInfo {
     fn default_vtxv2xy(&self) -> Vec<f32> {
         self.vtxv2xy.clone()
     }
+
+    fn from_existing(inner: VoronoiInfo, vtxv2xy: Vec<f32>) -> Self {
+        Self { inner, vtxv2xy }
+    }
+}
+
+#[pyclass(name = "VoronoiStage", unsendable)]
+pub struct PyVoronoiStage {
+    stage: Option<VoronoiStage>,
+}
+
+impl PyVoronoiStage {
+    fn new(stage: VoronoiStage) -> Self {
+        Self { stage: Some(stage) }
+    }
+
+    fn inner(&self) -> PyResult<&VoronoiStage> {
+        self.stage
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("VoronoiStage has already been consumed"))
+    }
+
+    fn into_inner(mut self) -> VoronoiStage {
+        self.stage
+            .take()
+            .expect("VoronoiStage already consumed")
+    }
+
+    fn take_stage(&mut self) -> PyResult<VoronoiStage> {
+        self.stage
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("VoronoiStage has already been consumed"))
+    }
+}
+
+#[pymethods]
+impl PyVoronoiStage {
+    pub fn site_positions(&self) -> PyResult<Vec<f32>> {
+        tensor_to_vec(self.inner()?.site2xy_adjusted.clone())
+    }
+
+    pub fn sanitized_coordinates(&self) -> PyResult<Vec<f32>> {
+        Ok(self.inner()?.site_coords_sanitized.clone())
+    }
+
+    pub fn vertex_coordinates(&self) -> PyResult<Vec<f32>> {
+        tensor_to_vec(self.inner()?.vtxv2xy.clone())
+    }
+
+    pub fn voronoi_info(&self) -> PyResult<PyVoronoiInfo> {
+        let info = clone_voronoi_info(&self.inner()?.voronoi_info);
+        let vtxv2xy = tensor_to_vec(self.inner()?.vtxv2xy.clone())?;
+        Ok(PyVoronoiInfo::from_existing(info, vtxv2xy))
+    }
+}
+
+#[pyclass(name = "OptimizeResult", unsendable)]
+pub struct PyOptimizeResult {
+    site2xy_adjusted: Vec<f32>,
+    site_coords_sanitized: Vec<f32>,
+    edge2vtxv_wall: Vec<usize>,
+    voronoi_info: VoronoiInfo,
+    vtxv2xy: Vec<f32>,
+}
+
+impl PyOptimizeResult {
+    fn from_raw(
+        site2xy_adjusted: Tensor,
+        voronoi_info: VoronoiInfo,
+        vtxv2xy: Tensor,
+        edge2vtxv_wall: Vec<usize>,
+        site_coords_sanitized: Vec<f32>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            site2xy_adjusted: tensor_to_vec(site2xy_adjusted)?,
+            site_coords_sanitized,
+            edge2vtxv_wall,
+            vtxv2xy: tensor_to_vec(vtxv2xy)?,
+            voronoi_info,
+        })
+    }
+}
+
+#[pymethods]
+impl PyOptimizeResult {
+    pub fn site2xy_adjusted(&self) -> Vec<f32> {
+        self.site2xy_adjusted.clone()
+    }
+
+    #[pyo3(name = "site_coordinates")]
+    pub fn site_coordinates_py(&self) -> Vec<f32> {
+        self.site_coords_sanitized.clone()
+    }
+
+    pub fn edge2vtvx_wall(&self) -> Vec<usize> {
+        self.edge2vtxv_wall.clone()
+    }
+
+    pub fn vertex_coordinates(&self) -> Vec<f32> {
+        self.vtxv2xy.clone()
+    }
+
+    pub fn voronoi_info(&self) -> PyVoronoiInfo {
+        PyVoronoiInfo::from_existing(clone_voronoi_info(&self.voronoi_info), self.vtxv2xy.clone())
+    }
+}
+
+#[pyclass(name = "OptimizeContext", unsendable)]
+pub struct PyOptimizeContext {
+    vtxl2xy: Vec<f32>,
+    site2xy: Var,
+    site2xy_ini: Tensor,
+    site2xy2flag: Var,
+    site2room: Vec<usize>,
+    room2area_trg: Tensor,
+    room_connections: Vec<(usize, usize)>,
+    optimizer: candle_nn::AdamW,
+    params: ProjectParams,
+}
+
+#[pymethods]
+impl PyOptimizeContext {
+    #[new]
+    #[pyo3(signature = (vtxl2xy, site2xy, site2room, site2xy2flag, room2area_trg, room_connections, params_index=None))]
+    fn new(
+        vtxl2xy: Vec<f32>,
+        site2xy: Vec<f32>,
+        site2room: Vec<usize>,
+        site2xy2flag: Vec<f32>,
+        room2area_trg: Vec<f32>,
+        room_connections: Vec<(usize, usize)>,
+        params_index: Option<usize>,
+    ) -> PyResult<Self> {
+        if site2xy.len() % 2 != 0 {
+            return Err(PyValueError::new_err("site2xy must contain x/y pairs"));
+        }
+        if site2xy2flag.len() != site2xy.len() {
+            return Err(PyValueError::new_err(
+                "site2xy2flag length must match site2xy length",
+            ));
+        }
+        let num_site = site2xy.len() / 2;
+        if site2room.len() != num_site {
+            return Err(PyValueError::new_err(
+                "site2room length must match number of sites",
+            ));
+        }
+        let num_room = room2area_trg.len();
+        let params_all = project_params_all();
+        let index = params_index.unwrap_or(0);
+        let params = params_all
+            .get(index)
+            .ok_or_else(|| PyValueError::new_err("params_index out of range"))?
+            .clone();
+
+        let site2xy_ini = tensor_from_vec(site2xy.clone(), num_site, 2)?;
+        let site2xy_var = var_from_vec(site2xy, num_site, 2)?;
+        let site2xy2flag_var = var_from_vec(site2xy2flag, num_site, 2)?;
+        let room2area_trg_tensor = Tensor::from_vec(
+            room2area_trg,
+            Shape::from((num_room, 1)),
+            &Device::Cpu,
+        )
+        .map_err(candle_err)?;
+
+        let optimizer = candle_nn::AdamW::new(
+            vec![site2xy_var.clone()],
+            candle_nn::ParamsAdamW {
+                lr: params.learning_rates.first as f64,
+                ..Default::default()
+            },
+        )
+        .map_err(candle_err)?;
+
+        Ok(Self {
+            vtxl2xy,
+            site2xy: site2xy_var,
+            site2xy_ini,
+            site2xy2flag: site2xy2flag_var,
+            site2room,
+            room2area_trg: room2area_trg_tensor,
+            room_connections,
+            optimizer,
+            params,
+        })
+    }
+
+    pub fn iterate_voronoi_stage(&self) -> PyResult<PyVoronoiStage> {
+        let stage = crate::iterate_voronoi_stage(&self.vtxl2xy, &self.site2xy, &self.site2room)
+            .map_err(anyhow_err)?;
+        Ok(PyVoronoiStage::new(stage))
+    }
+
+    pub fn optimize_iteration(
+        &mut self,
+        mut stage: PyRefMut<'_, PyVoronoiStage>,
+    ) -> PyResult<PyOptimizeResult> {
+        let stage = stage.take_stage()?;
+        let (site2xy_adjusted, voronoi_info, vtxv2xy, edge2vtxv_wall, site_coords_sanitized) =
+            crate::optimize_iteration(
+                &self.vtxl2xy,
+                &self.site2xy,
+                &self.site2xy_ini,
+                &self.site2xy2flag,
+                &self.site2room,
+                &self.room2area_trg,
+                &self.room_connections,
+                &mut self.optimizer,
+                &self.params,
+                stage,
+            )
+            .map_err(anyhow_err)?;
+        PyOptimizeResult::from_raw(
+            site2xy_adjusted,
+            voronoi_info,
+            vtxv2xy,
+            edge2vtxv_wall,
+            site_coords_sanitized,
+        )
+    }
+
+    pub fn learning_rates(&self) -> (f32, f32, f32) {
+        (
+            self.params.learning_rates.first,
+            self.params.learning_rates.second,
+            self.params.learning_rates.third,
+        )
+    }
+
+    pub fn set_learning_rate(&mut self, lr: f32) {
+        self.optimizer
+            .set_params(candle_nn::ParamsAdamW {
+                lr: lr as f64,
+                ..Default::default()
+            });
+    }
 }
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCanvasGif>()?;
     m.add_class::<PyVoronoiInfo>()?;
+    m.add_class::<PyVoronoiStage>()?;
+    m.add_class::<PyOptimizeResult>()?;
+    m.add_class::<PyOptimizeContext>()?;
+    m.add_function(wrap_pyfunction!(py_create_voronoi_stage, m)?)?;
     m.add_function(wrap_pyfunction!(py_my_paint, m)?)?;
     m.add_function(wrap_pyfunction!(py_draw_svg, m)?)?;
     m.add_function(wrap_pyfunction!(py_random_room_color, m)?)?;
@@ -119,6 +360,41 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_loss_topo_unidirectional, m)?)?;
     m.add_function(wrap_pyfunction!(py_loss_topo_kmean_style, m)?)?;
     Ok(())
+}
+
+#[pyfunction(name = "create_voronoi_stage", signature = (site2xy_adjusted, voronoi_info, vtxv2xy, site_coords_sanitized))]
+fn py_create_voronoi_stage(
+    site2xy_adjusted: Vec<f32>,
+    voronoi_info: &PyVoronoiInfo,
+    vtxv2xy: Vec<f32>,
+    site_coords_sanitized: Vec<f32>,
+) -> PyResult<PyVoronoiStage> {
+    if site2xy_adjusted.len() % 2 != 0 {
+        return Err(PyValueError::new_err(
+            "site2xy_adjusted must contain x/y coordinate pairs",
+        ));
+    }
+    if vtxv2xy.len() % 2 != 0 {
+        return Err(PyValueError::new_err(
+            "vtxv2xy must contain x/y coordinate pairs",
+        ));
+    }
+    if site_coords_sanitized.len() != site2xy_adjusted.len() {
+        return Err(PyValueError::new_err(
+            "site_coords_sanitized must match site2xy_adjusted length",
+        ));
+    }
+    let num_sites = site2xy_adjusted.len() / 2;
+    let num_vertices = vtxv2xy.len() / 2;
+    let site_tensor = tensor_from_vec(site2xy_adjusted, num_sites, 2)?;
+    let vtx_tensor = tensor_from_vec(vtxv2xy, num_vertices, 2)?;
+    let stage = VoronoiStage {
+        site2xy_adjusted: site_tensor,
+        voronoi_info: clone_voronoi_info(voronoi_info.as_ref()),
+        vtxv2xy: vtx_tensor,
+        site_coords_sanitized,
+    };
+    Ok(PyVoronoiStage::new(stage))
 }
 
 #[pyfunction(name = "my_paint", signature = (canvas, transform_to_scr, vtxl2xy, site2xy, voronoi_info, site2room, edge2vtxv_wall, vtxv2xy=None))]
@@ -380,6 +656,15 @@ fn ensure_len(len: usize, rows: usize, cols: usize) -> PyResult<()> {
         )));
     }
     Ok(())
+}
+
+fn clone_voronoi_info(info: &VoronoiInfo) -> VoronoiInfo {
+    VoronoiInfo {
+        site2idx: info.site2idx.clone(),
+        idx2vtxv: info.idx2vtxv.clone(),
+        idx2site: info.idx2site.clone(),
+        vtxv2info: info.vtxv2info.clone(),
+    }
 }
 
 fn candle_err(err: candle_core::Error) -> PyErr {

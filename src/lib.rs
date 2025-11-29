@@ -15,7 +15,7 @@ pub use voronoi::VoronoiBackend;
 
 static PROJECT_PARAMS: OnceLock<Vec<ProjectParams>> = OnceLock::new();
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct ProjectParams {
     #[serde(default)]
     loss_weights: LossWeights,
@@ -32,7 +32,7 @@ impl Default for ProjectParams {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct LossWeights {
     #[serde(default = "LossWeights::default_each_area")]
     each_area: f32,
@@ -84,7 +84,7 @@ impl Default for LossWeights {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct LearningRates {
     #[serde(default = "LearningRates::default_first")]
     first: f32,
@@ -1022,25 +1022,18 @@ fn build_voronoi_geometry(
     }
 }
 
-fn optimize_iteration(
+pub struct VoronoiStage {
+    pub(crate) site2xy_adjusted: candle_core::Tensor,
+    pub(crate) voronoi_info: del_candle::voronoi2::VoronoiInfo,
+    pub(crate) vtxv2xy: candle_core::Tensor,
+    pub(crate) site_coords_sanitized: Vec<f32>,
+}
+
+pub(crate) fn iterate_voronoi_stage(
     vtxl2xy: &[f32],
     site2xy: &candle_core::Var,
-    site2xy_ini: &candle_core::Tensor,
-    site2xy2flag: &candle_core::Var,
     site2room: &[usize],
-    room2area_trg: &candle_core::Tensor,
-    room_connections: &[(usize, usize)],
-    optimizer: &mut candle_nn::AdamW,
-    params: &ProjectParams,
-) -> anyhow::Result<(
-    candle_core::Tensor,
-    del_candle::voronoi2::VoronoiInfo,
-    candle_core::Tensor,
-    Vec<usize>,
-    Vec<f32>,
-)> {
-    let (num_rooms, _) = room2area_trg.dims2()?;
-    let loss_weights = &params.loss_weights;
+) -> anyhow::Result<VoronoiStage> {
     let min_site_radius = boundary_span(vtxl2xy) * 1.0e-3_f32;
     let site2xy_adjusted = enforce_site_spacing(site2xy, min_site_radius)?;
 
@@ -1076,6 +1069,40 @@ fn optimize_iteration(
     );
     std::io::stdout().flush().unwrap();
 
+    Ok(VoronoiStage {
+        site2xy_adjusted,
+        voronoi_info,
+        vtxv2xy,
+        site_coords_sanitized,
+    })
+}
+
+pub(crate) fn optimize_iteration(
+    vtxl2xy: &[f32],
+    site2xy: &candle_core::Var,
+    site2xy_ini: &candle_core::Tensor,
+    site2xy2flag: &candle_core::Var,
+    site2room: &[usize],
+    room2area_trg: &candle_core::Tensor,
+    room_connections: &[(usize, usize)],
+    optimizer: &mut candle_nn::AdamW,
+    params: &ProjectParams,
+    stage: VoronoiStage,
+) -> anyhow::Result<(
+    candle_core::Tensor,
+    del_candle::voronoi2::VoronoiInfo,
+    candle_core::Tensor,
+    Vec<usize>,
+    Vec<f32>,
+)> {
+    let VoronoiStage {
+        site2xy_adjusted,
+        voronoi_info,
+        vtxv2xy,
+        site_coords_sanitized,
+    } = stage;
+    let (num_rooms, _) = room2area_trg.dims2()?;
+    let loss_weights = &params.loss_weights;
     let edge2vtxv_wall = crate::edge2vtvx_wall(&voronoi_info, site2room);
     let (loss_each_area, loss_total_area) = {
         let room2area = crate::room2area(
@@ -1249,6 +1276,8 @@ fn optimize_phase(
             });
         }
 
+        let voronoi_stage = iterate_voronoi_stage(vtxl2xy, &site2xy, site2room)?;
+
         let (_site2xy_adjusted, voronoi_info, vtxv2xy, edge2vtxv_wall, site_coords_sanitized) =
             optimize_iteration(
                 vtxl2xy,
@@ -1260,6 +1289,7 @@ fn optimize_phase(
                 room_connections,
                 &mut optimizer,
                 params,
+                voronoi_stage,
             )?;
 
         let site2xy_render = site_coords_sanitized;
