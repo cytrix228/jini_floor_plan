@@ -25,9 +25,19 @@ impl candle_core::CustomOp1 for crate::voronoi2::Layer {
         let site2xy = storage.as_slice::<f32>()?;
         let num_vtxv = self.vtxv2info.len();
         let mut vtxv2xy = vec![0f32; num_vtxv * 2];
+        let num_vtxl = self.vtxl2xy.len() / 2;
         for i_vtxv in 0..num_vtxv {
+            let info = &self.vtxv2info[i_vtxv];
+            if info[3] == usize::MAX && info[0] >= num_vtxl {
+                eprintln!(
+                    "[layer] invalid boundary info before evaluation: i_vtxv={} info={:?} num_vtxl={}",
+                    i_vtxv,
+                    info,
+                    num_vtxl
+                );
+            }
             let cc = del_msh_core::voronoi2::position_of_voronoi_vertex(
-                &self.vtxv2info[i_vtxv],
+                info,
                 &self.vtxl2xy,
                 site2xy,
             );
@@ -75,11 +85,26 @@ impl candle_core::CustomOp1 for crate::voronoi2::Layer {
             let info = self.vtxv2info[i_vtxv];
             if info[1] == usize::MAX {
                 // this vtxv is one of vtxl
-                assert!(info[0] < self.vtxl2xy.len() / 2);
+                let num_vtxl = self.vtxl2xy.len() / 2;
+                if info[0] >= num_vtxl {
+                    panic!(
+                        "[layer-bwd] boundary reference {} out of {} (info={:?})",
+                        info[0],
+                        num_vtxl,
+                        info
+                    );
+                }
             } else if info[3] == usize::MAX {
                 // intersection of loop edge and two voronoi
                 let num_vtxl = self.vtxl2xy.len() / 2;
-                assert!(info[0] < num_vtxl);
+                if info[0] >= num_vtxl {
+                    panic!(
+                        "[layer-bwd] invalid boundary info: i_vtxv={} info={:?} num_vtxl={}",
+                        i_vtxv,
+                        info,
+                        num_vtxl
+                    );
+                }
                 let i1_loop = info[0];
                 let i2_loop = (i1_loop + 1) % num_vtxl;
                 let l1 = vec2_from(del_msh_core::vtx2xy::to_vec2(&self.vtxl2xy, i1_loop));

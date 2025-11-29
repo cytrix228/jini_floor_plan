@@ -70,7 +70,7 @@ def resample_polyloop(points: Sequence[Point], target_count: int) -> List[Point]
     lengths = segment_lengths(points)
     perimeter = sum(lengths)
     spacing = perimeter / target_count
-    print( "perimeter", perimeter, "spacing", spacing )
+    # print( "perimeter", perimeter, "spacing", spacing )
     resampled: List[Point] = []
     acc = 0.0
     idx = 0
@@ -134,15 +134,15 @@ def problem(seed: int):
     
     print("Sampling duck path...")
     path_samples = sample_svg_path(400)
-    print( path_samples )
+    # print( path_samples )
     
     print("Resampling duck path...")
     loop = resample_polyloop(path_samples, 100)
     def mylength(p0, p1) -> float:
         return math.hypot(p1[0] - p0[0], p1[1] - p0[1])
-    for i, p in enumerate(loop):
-        print( "Segment", i, "point", p )
-        print( mylength( loop[i], loop[(i+1)%len(loop)] ) )
+    # for i, p in enumerate(loop):
+    #     print( "Segment", i, "point", p )
+    #     print( mylength( loop[i], loop[(i+1)%len(loop)] ) )
     
     print("Normalizing duck path...")
     loop = normalize_loop(loop)

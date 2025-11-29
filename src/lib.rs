@@ -8,6 +8,7 @@ use std::backtrace::Backtrace;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
+mod delaunay;
 pub mod loss_topo;
 mod voronoi;
 pub use voronoi::VoronoiBackend;
@@ -912,14 +913,54 @@ fn boundary_span(vtxl2xy: &[f32]) -> f32 {
     (max_x - min_x).abs().max((max_y - min_y).abs()).max(1.0)
 }
 
+fn boundary_centroid(vtxl2xy: &[f32]) -> [f32; 2] {
+    if vtxl2xy.is_empty() {
+        return [0.5, 0.5];
+    }
+    let mut sum_x = 0.0f32;
+    let mut sum_y = 0.0f32;
+    let mut count = 0usize;
+    for chunk in vtxl2xy.chunks(2) {
+        if chunk.len() < 2 {
+            continue;
+        }
+        sum_x += chunk[0];
+        sum_y += chunk[1];
+        count += 1;
+    }
+    if count == 0 {
+        return [0.5, 0.5];
+    }
+    let inv = 1.0 / (count as f32);
+    [sum_x * inv, sum_y * inv]
+}
+
 fn build_voronoi_geometry(
     vtxl2xy: &[f32],
     site2xy: &candle_core::Tensor,
     site2room: &[usize],
     backend: VoronoiBackend,
-) -> anyhow::Result<(candle_core::Tensor, VoronoiInfo)> {
+) -> anyhow::Result<(candle_core::Tensor, VoronoiInfo, Vec<f32>)> {
     let alive: Vec<bool> = site2room.iter().map(|room| *room != usize::MAX).collect();
-    let site_coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
+    let site_coords_raw = site2xy.flatten_all()?.to_vec1::<f32>()?;
+    let mut site_positions: Vec<[f32; 2]> = site_coords_raw
+        .chunks(2)
+        .filter(|chunk| chunk.len() == 2)
+        .map(|c| [c[0], c[1]])
+        .collect();
+    let fallback = boundary_centroid(vtxl2xy);
+    let sanitized = crate::voronoi::sanitize_site_positions(&mut site_positions, fallback);
+    if sanitized > 0 {
+        eprintln!(
+            "[floorplan] sanitized {} site coordinates before Voronoi construction",
+            sanitized
+        );
+    }
+    let mut site_coords = Vec::with_capacity(site_positions.len() * 2);
+    for pos in &site_positions {
+        site_coords.push(pos[0]);
+        site_coords.push(pos[1]);
+    }
     match backend {
         VoronoiBackend::Legacy => {
             let site2cells = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -961,7 +1002,7 @@ fn build_voronoi_geometry(
                 idx2site,
                 vtxv2info: voronoi_mesh.vtxv2info,
             };
-            Ok((vtxv2xy, info))
+            Ok((vtxv2xy, info, site_coords))
         }
         VoronoiBackend::Delaunay => {
             let diagram = crate::voronoi::compute_delaunay_voronoi(vtxl2xy, &site_coords, &alive)?;
@@ -976,7 +1017,7 @@ fn build_voronoi_geometry(
                 idx2site: diagram.idx2site,
                 vtxv2info: diagram.vtxv2info,
             };
-            Ok((vtxv2xy, info))
+            Ok((vtxv2xy, info, site_coords))
         }
     }
 }
@@ -996,6 +1037,7 @@ fn optimize_iteration(
     del_candle::voronoi2::VoronoiInfo,
     candle_core::Tensor,
     Vec<usize>,
+    Vec<f32>,
 )> {
     let (num_rooms, _) = room2area_trg.dims2()?;
     let loss_weights = &params.loss_weights;
@@ -1015,13 +1057,25 @@ fn optimize_iteration(
         }
     }
 
-    // println!("Check point time: {:?} at voronoi", std::time::Instant::now());
-    let (vtxv2xy, voronoi_info) = build_voronoi_geometry(
+    println!(
+        "Check point time: {:?} at start build_voronoi_geometry",
+        std::time::Instant::now()
+    );
+    std::io::stdout().flush().unwrap();
+
+    let (vtxv2xy, voronoi_info, site_coords_sanitized) = build_voronoi_geometry(
         vtxl2xy,
         &site2xy_adjusted,
         site2room,
         VoronoiBackend::Delaunay,
     )?;
+
+    println!(
+        "Check point time: {:?} at end build_voronoi_geometry",
+        std::time::Instant::now()
+    );
+    std::io::stdout().flush().unwrap();
+
     let edge2vtxv_wall = crate::edge2vtvx_wall(&voronoi_info, site2room);
     let (loss_each_area, loss_total_area) = {
         let room2area = crate::room2area(
@@ -1078,8 +1132,26 @@ fn optimize_iteration(
     let loss_lloyd = loss_lloyd.affine(loss_weights.lloyd as f64, 0.0)?;
     let loss =
         (loss_each_area + loss_total_area + loss_walllen + loss_topo + loss_fix + loss_lloyd)?;
+
+    println!(
+        "Check point time: {:?} at start backward_step",
+        std::time::Instant::now()
+    );
+    std::io::stdout().flush().unwrap();
     optimizer.backward_step(&loss)?;
-    Ok((site2xy_adjusted, voronoi_info, vtxv2xy, edge2vtxv_wall))
+    println!(
+        "Check point time: {:?} at end backward_step",
+        std::time::Instant::now()
+    );
+    std::io::stdout().flush().unwrap();
+
+    Ok((
+        site2xy_adjusted,
+        voronoi_info,
+        vtxv2xy,
+        edge2vtxv_wall,
+        site_coords_sanitized,
+    ))
 }
 
 use std::io::Write;
@@ -1177,19 +1249,20 @@ fn optimize_phase(
             });
         }
 
-        let (site2xy_adjusted, voronoi_info, vtxv2xy, edge2vtxv_wall) = optimize_iteration(
-            vtxl2xy,
-            &site2xy,
-            site2xy_ini,
-            &site2xy2flag,
-            site2room,
-            room2area_trg,
-            room_connections,
-            &mut optimizer,
-            params,
-        )?;
+        let (_site2xy_adjusted, voronoi_info, vtxv2xy, edge2vtxv_wall, site_coords_sanitized) =
+            optimize_iteration(
+                vtxl2xy,
+                &site2xy,
+                site2xy_ini,
+                &site2xy2flag,
+                site2room,
+                room2area_trg,
+                room_connections,
+                &mut optimizer,
+                params,
+            )?;
 
-        let site2xy_render = site2xy_adjusted.flatten_all()?.to_vec1::<f32>()?;
+        let site2xy_render = site_coords_sanitized;
         let vtxv2xy_render = vtxv2xy.flatten_all()?.to_vec1::<f32>()?;
         if let Err(err) = record_site_diagnostics(
             &diag_path,
@@ -1202,6 +1275,13 @@ fn optimize_phase(
             eprintln!("[floorplan] failed to write site diagnostics: {err}");
         }
         canvas_gif.clear(0);
+
+        println!(
+            "Check point time: {:?} at start my_paint",
+            std::time::Instant::now()
+        );
+        std::io::stdout().flush().unwrap();
+
         crate::my_paint(
             canvas_gif,
             transform_world2pix,
@@ -1212,6 +1292,13 @@ fn optimize_phase(
             site2room,
             &edge2vtxv_wall,
         );
+
+        println!(
+            "Check point time: {:?} at end my_paint",
+            std::time::Instant::now()
+        );
+        std::io::stdout().flush().unwrap();
+
         canvas_gif.write();
     }
 

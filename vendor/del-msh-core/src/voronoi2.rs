@@ -310,7 +310,14 @@ pub fn position_of_voronoi_vertex(info: &[usize; 4], vtxl2xy: &[f32], site2xy: &
     } else if info[3] == usize::MAX {
         // two points against edge
         let num_vtxl = vtxl2xy.len() / 2;
-        assert!(info[0] < num_vtxl);
+        if info[0] >= num_vtxl {
+            panic!(
+                "voronoi vertex references boundary index {} but boundary has {} vertices (info={:?})",
+                info[0],
+                num_vtxl,
+                info
+            );
+        }
         let i1_loop = info[0];
         let i2_loop = (i1_loop + 1) % num_vtxl;
         let l1 = crate::vtx2xy::to_vec2(vtxl2xy, i1_loop);
