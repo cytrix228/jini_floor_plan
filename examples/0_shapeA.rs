@@ -27,22 +27,16 @@ fn problem(
             -51.2, -26.2, 276.8, -26.2, 276.8, 94.2, 218., 94.2, 218., 188.5, 197.8, 188.5, 197.8,
             254.4, 100.8, 254.4, 100.8, 234.8, 0., 234.8, 0., 65.9, -51.2, 65.9, -51.2, -26.2,
         ];
-        let vtxl2xy = del_msh_core::polyloop::resample::<f32, 2>(&vtxl2xy, 100);
-        let vtxl2xy = del_msh_core::vtx2xdim::to_array_of_nalgebra_vector(&vtxl2xy);
-        let vtxl2xy = del_msh_core::vtx2vec::normalize2(
-            &vtxl2xy,
-            &nalgebra::Vector2::<f32>::new(0.5, 0.5),
-            1.0,
-        );
-        // dbg!(&vtxl2xy);
+        let mut vtxl2xy = del_msh_core::polyloop::resample::<f32, 2>(&vtxl2xy, 100);
+        vtxl2xy = del_msh_core::vtx2xy::normalize(&vtxl2xy, &[0.5, 0.5], 1.0);
         dbg!(vtxl2xy.len());
-        let _ = del_msh_core::io_obj::save_vtx2vecn_as_polyloop("target/loop.obj", &vtxl2xy);
-        del_msh_core::vtx2xdim::from_array_of_nalgebra(&vtxl2xy)
+        let _ = del_msh_core::io_obj::save_vtx2xyz_as_polyloop("target/loop.obj", &vtxl2xy, 2);
+        vtxl2xy
     };
     dbg!(&vtxl2xy);
     let area_ratio = [0.4, 0.2, 0.2, 0.2];
     let room2area_trg: Vec<f32> = {
-        let total_area = del_msh_core::polyloop2::area_(&vtxl2xy);
+        let total_area = del_msh_core::polyloop2::area(&vtxl2xy);
         dbg!(total_area);
         let sum_ratio: f32 = area_ratio.iter().sum();
         area_ratio
@@ -53,11 +47,10 @@ fn problem(
     dbg!(&room2area_trg);
     //
     let (site2xy, site2xy2flag, site2room) = {
-        let mut site2xy = del_msh_core::sampling::poisson_disk_sampling_from_polyloop2(
-            &vtxl2xy, 0.03, 50, &mut reng,
-        );
-        let mut site2xy2flag = vec![0f32; site2xy.len()];
-        let mut site2room =
+        let site2xy =
+            del_msh_core::polyloop2::poisson_disk_sampling(&vtxl2xy, 0.03, 50, &mut reng);
+        let site2xy2flag = vec![0f32; site2xy.len()];
+        let site2room =
             floorplan::site2room(site2xy.len() / 2, &room2area_trg[0..room2area_trg.len()]);
         (site2xy, site2xy2flag, site2room)
     };
@@ -96,6 +89,7 @@ fn main() -> anyhow::Result<()> {
         room2color,
         room_connections,
         400,
+        0,
     )?;
 
     Ok(())

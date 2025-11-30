@@ -1,0 +1,2 @@
+maturin build --release -F python-bindings --interpreter /opt/hfs21.0/python/bin/python --out target/wheels \
+&& /opt/hfs21.0/python/bin/python -m pip install --upgrade --no-deps --target /home/cytrix/project3/houdinilib target/wheels/floorplan-0.1.0-cp311-cp311-manylinux_2_39_x86_64.whl

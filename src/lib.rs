@@ -269,7 +269,7 @@ pub fn my_paint(
         if i_room == usize::MAX {
             continue;
         }
-        let i_color: u8 = if i_room == usize::MAX {
+        let _i_color: u8 = if i_room == usize::MAX {
             1
         } else {
             (i_room + 2).try_into().unwrap()

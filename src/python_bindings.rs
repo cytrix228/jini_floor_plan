@@ -288,6 +288,85 @@ impl PyOptimizeContext {
         })
     }
 
+    pub fn vtxl2xy(&self) -> Vec<f32> {
+        self.vtxl2xy.clone()
+    }
+
+    pub fn set_vtxl2xy(&mut self, values: Vec<f32>) -> PyResult<()> {
+        if values.len() % 2 != 0 {
+            return Err(PyValueError::new_err("vtxl2xy must contain x/y coordinate pairs"));
+        }
+        self.vtxl2xy = values;
+        Ok(())
+    }
+
+    pub fn site2xy(&self) -> PyResult<Vec<f32>> {
+        tensor_to_vec(self.site2xy.as_tensor().clone())
+    }
+
+    pub fn set_site2xy(&mut self, values: Vec<f32>) -> PyResult<()> {
+        let (rows, cols) = self.site2xy.dims2().map_err(candle_err)?;
+        ensure_len(values.len(), rows, cols)?;
+        let tensor = tensor_from_vec(values, rows, cols)?;
+        self.site2xy.set(&tensor).map_err(candle_err)
+    }
+
+    pub fn site2xy_ini(&self) -> PyResult<Vec<f32>> {
+        tensor_to_vec(self.site2xy_ini.clone())
+    }
+
+    pub fn set_site2xy_ini(&mut self, values: Vec<f32>) -> PyResult<()> {
+        let (rows, cols) = self.site2xy_ini.dims2().map_err(candle_err)?;
+        ensure_len(values.len(), rows, cols)?;
+        self.site2xy_ini = tensor_from_vec(values, rows, cols)?;
+        Ok(())
+    }
+
+    pub fn site2xy2flag(&self) -> PyResult<Vec<f32>> {
+        tensor_to_vec(self.site2xy2flag.as_tensor().clone())
+    }
+
+    pub fn set_site2xy2flag(&mut self, values: Vec<f32>) -> PyResult<()> {
+        let (rows, cols) = self.site2xy2flag.dims2().map_err(candle_err)?;
+        ensure_len(values.len(), rows, cols)?;
+        let tensor = tensor_from_vec(values, rows, cols)?;
+        self.site2xy2flag.set(&tensor).map_err(candle_err)
+    }
+
+    pub fn site2room(&self) -> Vec<usize> {
+        self.site2room.clone()
+    }
+
+    pub fn set_site2room(&mut self, values: Vec<usize>) -> PyResult<()> {
+        let (rows, _) = self.site2xy.dims2().map_err(candle_err)?;
+        if values.len() != rows {
+            return Err(PyValueError::new_err(
+                "site2room length must match the number of sites",
+            ));
+        }
+        self.site2room = values;
+        Ok(())
+    }
+
+    pub fn room2area_trg(&self) -> PyResult<Vec<f32>> {
+        tensor_to_vec(self.room2area_trg.clone())
+    }
+
+    pub fn set_room2area_trg(&mut self, values: Vec<f32>) -> PyResult<()> {
+        let (rows, cols) = self.room2area_trg.dims2().map_err(candle_err)?;
+        ensure_len(values.len(), rows, cols)?;
+        self.room2area_trg = tensor_from_vec(values, rows, cols)?;
+        Ok(())
+    }
+
+    pub fn room_connections(&self) -> Vec<(usize, usize)> {
+        self.room_connections.clone()
+    }
+
+    pub fn set_room_connections(&mut self, connections: Vec<(usize, usize)>) {
+        self.room_connections = connections;
+    }
+
     pub fn iterate_voronoi_stage(&self) -> PyResult<PyVoronoiStage> {
         let stage = crate::iterate_voronoi_stage(&self.vtxl2xy, &self.site2xy, &self.site2room)
             .map_err(anyhow_err)?;
@@ -340,11 +419,13 @@ impl PyOptimizeContext {
 }
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("FLOORPLAN_VER"))?;
     m.add_class::<PyCanvasGif>()?;
     m.add_class::<PyVoronoiInfo>()?;
     m.add_class::<PyVoronoiStage>()?;
     m.add_class::<PyOptimizeResult>()?;
     m.add_class::<PyOptimizeContext>()?;
+    m.add_function(wrap_pyfunction!(py_voronoi_info_from_raw, m)?)?;
     m.add_function(wrap_pyfunction!(py_create_voronoi_stage, m)?)?;
     m.add_function(wrap_pyfunction!(py_my_paint, m)?)?;
     m.add_function(wrap_pyfunction!(py_draw_svg, m)?)?;
@@ -395,6 +476,69 @@ fn py_create_voronoi_stage(
         site_coords_sanitized,
     };
     Ok(PyVoronoiStage::new(stage))
+}
+
+#[pyfunction(name = "voronoi_info_from_raw", signature = (site2idx, idx2vtxv, idx2site, vtxv2xy, vtxv2info=None))]
+fn py_voronoi_info_from_raw(
+    site2idx: Vec<usize>,
+    idx2vtxv: Vec<usize>,
+    idx2site: Vec<isize>,
+    vtxv2xy: Vec<f32>,
+    vtxv2info: Option<Vec<usize>>,
+) -> PyResult<PyVoronoiInfo> {
+    if site2idx.len() < 2 {
+        return Err(PyValueError::new_err(
+            "site2idx must contain at least two entries (prefix array)",
+        ));
+    }
+    if idx2vtxv.len() != idx2site.len() {
+        return Err(PyValueError::new_err(
+            "idx2vtxv and idx2site must have the same length",
+        ));
+    }
+    if *site2idx.last().unwrap() != idx2vtxv.len() {
+        return Err(PyValueError::new_err(
+            "site2idx must terminate with idx2vtxv length",
+        ));
+    }
+    if vtxv2xy.len() % 2 != 0 {
+        return Err(PyValueError::new_err(
+            "vtxv2xy must contain x/y coordinate pairs",
+        ));
+    }
+    let num_vertices = vtxv2xy.len() / 2;
+    if let Some(max_index) = idx2vtxv.iter().copied().max() {
+        if max_index >= num_vertices {
+            return Err(PyValueError::new_err(
+                "idx2vtxv contains an index outside the vertex array",
+            ));
+        }
+    }
+    let mut idx2site_converted = Vec::with_capacity(idx2site.len());
+    for value in idx2site {
+        if value < 0 {
+            idx2site_converted.push(usize::MAX);
+        } else {
+            idx2site_converted.push(value as usize);
+        }
+    }
+
+    let info = match vtxv2info {
+        Some(flat) => reshape_vtxv2info(flat, num_vertices)?,
+        None => vec![[usize::MAX; 4]; num_vertices],
+    };
+    if info.len() != num_vertices {
+        return Err(PyValueError::new_err(
+            "vtxv2info must describe every Voronoi vertex",
+        ));
+    }
+    let voronoi_info = VoronoiInfo {
+        site2idx,
+        idx2vtxv,
+        idx2site: idx2site_converted,
+        vtxv2info: info,
+    };
+    Ok(PyVoronoiInfo::from_existing(voronoi_info, vtxv2xy))
 }
 
 #[pyfunction(name = "my_paint", signature = (canvas, transform_to_scr, vtxl2xy, site2xy, voronoi_info, site2room, edge2vtxv_wall, vtxv2xy=None))]
@@ -656,6 +800,24 @@ fn ensure_len(len: usize, rows: usize, cols: usize) -> PyResult<()> {
         )));
     }
     Ok(())
+}
+
+fn reshape_vtxv2info(flat: Vec<usize>, num_vertices: usize) -> PyResult<Vec<[usize; 4]>> {
+    if flat.len() % 4 != 0 {
+        return Err(PyValueError::new_err(
+            "vtxv2info must be provided as groups of four indices",
+        ));
+    }
+    let mut info = Vec::with_capacity(flat.len() / 4);
+    for chunk in flat.chunks(4) {
+        info.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    if info.len() != num_vertices {
+        return Err(PyValueError::new_err(
+            "vtxv2info length must match the number of Voronoi vertices",
+        ));
+    }
+    Ok(info)
 }
 
 fn clone_voronoi_info(info: &VoronoiInfo) -> VoronoiInfo {
