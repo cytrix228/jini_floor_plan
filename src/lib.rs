@@ -940,7 +940,7 @@ fn build_voronoi_geometry(
     site2xy: &candle_core::Tensor,
     site2room: &[usize],
     backend: VoronoiBackend,
-) -> anyhow::Result<(candle_core::Tensor, VoronoiInfo, Vec<f32>)> {
+) -> anyhow::Result<(candle_core::Tensor, candle_core::Tensor, VoronoiInfo, Vec<f32>)> {
     let alive: Vec<bool> = site2room.iter().map(|room| *room != usize::MAX).collect();
     let site_coords_raw = site2xy.flatten_all()?.to_vec1::<f32>()?;
     let mut site_positions: Vec<[f32; 2]> = site_coords_raw
@@ -961,6 +961,25 @@ fn build_voronoi_geometry(
         site_coords.push(pos[0]);
         site_coords.push(pos[1]);
     }
+    let mut delta: Vec<f32> = Vec::with_capacity(site_coords.len());
+    let mut has_delta = false;
+    for (raw, sanitized_val) in site_coords_raw.iter().zip(site_coords.iter()) {
+        let diff = sanitized_val - raw;
+        if diff != 0.0 {
+            has_delta = true;
+        }
+        delta.push(diff);
+    }
+    let site2xy_sanitized = if has_delta {
+        let delta_tensor = candle_core::Tensor::from_vec(
+            delta,
+            site2xy.shape().clone(),
+            site2xy.device(),
+        )?;
+        site2xy.add(&delta_tensor)?
+    } else {
+        site2xy.clone()
+    };
     match backend {
         VoronoiBackend::Legacy => {
             let site2cells = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -990,7 +1009,7 @@ fn build_voronoi_geometry(
                 vtxl2xy: vtxl2xy.to_vec(),
                 vtxv2info: voronoi_mesh.vtxv2info.clone(),
             };
-            let vtxv2xy = site2xy.apply_op1(layer)?;
+            let vtxv2xy = site2xy_sanitized.apply_op1(layer)?;
             let idx2site = del_msh_core::elem2elem::from_polygon_mesh(
                 &voronoi_mesh.site2idx,
                 &voronoi_mesh.idx2vtxv,
@@ -1002,7 +1021,7 @@ fn build_voronoi_geometry(
                 idx2site,
                 vtxv2info: voronoi_mesh.vtxv2info,
             };
-            Ok((vtxv2xy, info, site_coords))
+            Ok((site2xy_sanitized, vtxv2xy, info, site_coords))
         }
         VoronoiBackend::Delaunay => {
             let diagram = crate::voronoi::compute_delaunay_voronoi(vtxl2xy, &site_coords, &alive)?;
@@ -1010,14 +1029,14 @@ fn build_voronoi_geometry(
                 vtxl2xy: vtxl2xy.to_vec(),
                 vtxv2info: diagram.vtxv2info.clone(),
             };
-            let vtxv2xy = site2xy.apply_op1(layer)?;
+            let vtxv2xy = site2xy_sanitized.apply_op1(layer)?;
             let info = VoronoiInfo {
                 site2idx: diagram.site2idx,
                 idx2vtxv: diagram.idx2vtxv,
                 idx2site: diagram.idx2site,
                 vtxv2info: diagram.vtxv2info,
             };
-            Ok((vtxv2xy, info, site_coords))
+            Ok((site2xy_sanitized, vtxv2xy, info, site_coords))
         }
     }
 }
@@ -1056,12 +1075,13 @@ pub(crate) fn iterate_voronoi_stage(
     );
     std::io::stdout().flush().unwrap();
 
-    let (vtxv2xy, voronoi_info, site_coords_sanitized) = build_voronoi_geometry(
+    let (site2xy_sanitized, vtxv2xy, voronoi_info, site_coords_sanitized) =
+        build_voronoi_geometry(
         vtxl2xy,
         &site2xy_adjusted,
         site2room,
         VoronoiBackend::Delaunay,
-    )?;
+        )?;
 
     println!(
         "Check point time: {:?} at end build_voronoi_geometry",
@@ -1070,7 +1090,7 @@ pub(crate) fn iterate_voronoi_stage(
     std::io::stdout().flush().unwrap();
 
     Ok(VoronoiStage {
-        site2xy_adjusted,
+        site2xy_adjusted: site2xy_sanitized,
         voronoi_info,
         vtxv2xy,
         site_coords_sanitized,
@@ -1158,7 +1178,20 @@ pub(crate) fn optimize_iteration(
     let loss_fix = loss_fix.affine(loss_weights.fix as f64, 0.0)?;
     let loss_lloyd = loss_lloyd.affine(loss_weights.lloyd as f64, 0.0)?;
     let loss =
-        (loss_each_area + loss_total_area + loss_walllen + loss_topo + loss_fix + loss_lloyd)?;
+        (&loss_each_area + &loss_total_area + &loss_walllen + &loss_topo + &loss_fix + &loss_lloyd)?;
+
+    // Check for NaN loss
+    let loss_scalar = loss.to_scalar::<f32>()?;
+    if !loss_scalar.is_finite() {
+        eprintln!("[floorplan] Loss is not finite: {}", loss_scalar);
+        eprintln!("loss_each_area: {}", loss_each_area.to_scalar::<f32>()?);
+        eprintln!("loss_total_area: {}", loss_total_area.to_scalar::<f32>()?);
+        eprintln!("loss_walllen: {}", loss_walllen.to_scalar::<f32>()?);
+        eprintln!("loss_topo: {}", loss_topo.to_scalar::<f32>()?);
+        eprintln!("loss_fix: {}", loss_fix.to_scalar::<f32>()?);
+        eprintln!("loss_lloyd: {}", loss_lloyd.to_scalar::<f32>()?);
+        return Err(anyhow::anyhow!("Loss is not finite"));
+    }
 
     println!(
         "Check point time: {:?} at start backward_step",

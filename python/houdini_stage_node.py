@@ -185,10 +185,13 @@ def cook_voronoi_stage(node: hou.SopNode) -> None:
 
     geo = node.geometry()
     geo.clear()
+    site_attr_dst = geo.addAttrib(hou.attribType.Point, SITE_ATTR, 0)
     new_points = [geo.createPoint() for _ in site_points]
     adjusted = result.site_coordinates()
     for idx, pt in enumerate(new_points):
         pt.setPosition(hou.Vector3(adjusted[idx * 2], adjusted[idx * 2 + 1], 0.0))
+        site_id_val = site_points[idx].intAttribValue(SITE_ATTR)
+        pt.setAttribValue(site_attr_dst, site_id_val)
 
     hou.ui.setStatusMessage(
         "optimize_iteration finished",

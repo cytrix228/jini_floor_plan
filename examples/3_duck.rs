@@ -43,23 +43,32 @@ fn problem(
         let loops = del_msh_core::io_svg::svg_loops_from_outline_path(&outline_path);
         let vtxl2xy =
             del_msh_core::io_svg::polybezier2polyloop(&loops[0].0, &loops[0].1, loops[0].2, 300.);
-        let vtxl2xy = del_msh_core::vtx2xdim::from_array_of_nalgebra(&vtxl2xy);
-        let vtxl2xy = del_msh_core::polyloop::resample::<f32, 2>(&vtxl2xy, 100);
-        let vtxl2xy = del_msh_core::vtx2xdim::to_array_of_nalgebra_vector(&vtxl2xy);
-        let vtxl2xy = del_msh_core::vtx2vec::normalize2(
-            &vtxl2xy,
-            &nalgebra::Vector2::<f32>::new(0.5, 0.5),
-            1.0,
-        );
-        // dbg!(&vtxl2xy);
-        dbg!(vtxl2xy.len());
-        let _ = del_msh_core::io_obj::save_vtx2vecn_as_polyloop("target/loop.obj", &vtxl2xy);
-        del_msh_core::vtx2xdim::from_array_of_nalgebra(&vtxl2xy)
+        let mut vtxl2xy_flat: Vec<f32> = vtxl2xy.iter().flat_map(|p| [p[0], p[1]]).collect();
+        vtxl2xy_flat = del_msh_core::polyloop::resample::<f32, 2>(&vtxl2xy_flat, 100);
+        vtxl2xy_flat = del_msh_core::vtx2xy::normalize(&vtxl2xy_flat, &[0.5, 0.5], 1.0);
+        {
+            let mut min_x = vtxl2xy_flat[0];
+            let mut max_x = vtxl2xy_flat[0];
+            let mut min_y = vtxl2xy_flat[1];
+            let mut max_y = vtxl2xy_flat[1];
+            for i in (0..vtxl2xy_flat.len()).step_by(2) {
+                let x = vtxl2xy_flat[i];
+                let y = vtxl2xy_flat[i + 1];
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+            println!("Boundary bounds: x=[{}, {}], y=[{}, {}]", min_x, max_x, min_y, max_y);
+        }
+        dbg!(vtxl2xy_flat.len());
+        let _ = del_msh_core::io_obj::save_vtx2xyz_as_polyloop("target/loop.obj", &vtxl2xy_flat, 2);
+        vtxl2xy_flat
     };
     dbg!(&vtxl2xy);
     let area_ratio = [0.4, 0.2, 0.2, 0.2, 0.2, 0.1];
     let room2area_trg: Vec<f32> = {
-        let total_area = del_msh_core::polyloop2::area_(&vtxl2xy);
+        let total_area = del_msh_core::polyloop2::area(&vtxl2xy);
         let sum_ratio: f32 = area_ratio.iter().sum();
         area_ratio
             .iter()
@@ -69,9 +78,8 @@ fn problem(
     dbg!(&room2area_trg);
     //
     let (site2xy, site2xy2flag, site2room) = {
-        let mut site2xy = del_msh_core::sampling::poisson_disk_sampling_from_polyloop2(
-            &vtxl2xy, 0.03, 50, &mut reng,
-        );
+        let mut site2xy =
+            del_msh_core::polyloop2::poisson_disk_sampling(&vtxl2xy, 0.03, 50, &mut reng);
         let mut site2xy2flag = vec![0f32; site2xy.len()];
         let mut site2room = floorplan::site2room(
             site2xy.len() / 2,
@@ -120,6 +128,7 @@ fn main() -> anyhow::Result<()> {
         room2color,
         room_connections,
         400,
+        0,
     )?;
     Ok(())
 }

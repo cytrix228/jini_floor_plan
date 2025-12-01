@@ -47,8 +47,7 @@ fn problem(
     dbg!(&room2area_trg);
     //
     let (site2xy, site2xy2flag, site2room) = {
-        let site2xy =
-            del_msh_core::polyloop2::poisson_disk_sampling(&vtxl2xy, 0.03, 50, &mut reng);
+        let site2xy = del_msh_core::polyloop2::poisson_disk_sampling(&vtxl2xy, 0.03, 50, &mut reng);
         let site2xy2flag = vec![0f32; site2xy.len()];
         let site2room =
             floorplan::site2room(site2xy.len() / 2, &room2area_trg[0..room2area_trg.len()]);

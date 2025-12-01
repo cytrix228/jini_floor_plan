@@ -152,6 +152,7 @@ pub fn unidirectional(
     assert_eq!(site2xy0.len(), num_site * 2);
     let mut site2xytrg = site2xy0.clone();
     for i_room in 0..num_room {
+        // println!("Processing room {}", i_room);
         assert!(!room2group[i_room].is_empty());
         if room2group[i_room].len() == 1 {
             // the room is in one piece

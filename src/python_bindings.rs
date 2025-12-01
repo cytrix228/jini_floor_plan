@@ -124,9 +124,7 @@ impl PyVoronoiStage {
     }
 
     fn into_inner(mut self) -> VoronoiStage {
-        self.stage
-            .take()
-            .expect("VoronoiStage already consumed")
+        self.stage.take().expect("VoronoiStage already consumed")
     }
 
     fn take_stage(&mut self) -> PyResult<VoronoiStage> {
@@ -259,12 +257,9 @@ impl PyOptimizeContext {
         let site2xy_ini = tensor_from_vec(site2xy.clone(), num_site, 2)?;
         let site2xy_var = var_from_vec(site2xy, num_site, 2)?;
         let site2xy2flag_var = var_from_vec(site2xy2flag, num_site, 2)?;
-        let room2area_trg_tensor = Tensor::from_vec(
-            room2area_trg,
-            Shape::from((num_room, 1)),
-            &Device::Cpu,
-        )
-        .map_err(candle_err)?;
+        let room2area_trg_tensor =
+            Tensor::from_vec(room2area_trg, Shape::from((num_room, 1)), &Device::Cpu)
+                .map_err(candle_err)?;
 
         let optimizer = candle_nn::AdamW::new(
             vec![site2xy_var.clone()],
@@ -294,7 +289,9 @@ impl PyOptimizeContext {
 
     pub fn set_vtxl2xy(&mut self, values: Vec<f32>) -> PyResult<()> {
         if values.len() % 2 != 0 {
-            return Err(PyValueError::new_err("vtxl2xy must contain x/y coordinate pairs"));
+            return Err(PyValueError::new_err(
+                "vtxl2xy must contain x/y coordinate pairs",
+            ));
         }
         self.vtxl2xy = values;
         Ok(())
@@ -410,11 +407,10 @@ impl PyOptimizeContext {
     }
 
     pub fn set_learning_rate(&mut self, lr: f32) {
-        self.optimizer
-            .set_params(candle_nn::ParamsAdamW {
-                lr: lr as f64,
-                ..Default::default()
-            });
+        self.optimizer.set_params(candle_nn::ParamsAdamW {
+            lr: lr as f64,
+            ..Default::default()
+        });
     }
 }
 

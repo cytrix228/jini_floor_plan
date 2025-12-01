@@ -1,16 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 
 use crate::delaunay::Triangulation;
-use std::fs::File;
-use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const EPS_POS: f32 = 1.0e-6;
 const EDGE_TOLERANCE: f32 = 1.0e-6;
 const EDGE_TOLERANCE_SQ: f32 = EDGE_TOLERANCE * EDGE_TOLERANCE;
 const FULL_CELL_AREA_RATIO: f32 = 0.995;
+
 const CELL_COLORS: [&str; 8] = [
     "#e6194B", "#3cb44b", "#ffe119", "#0082c8", "#f58231", "#911eb4", "#46f0f0", "#f032e6",
 ];
@@ -56,6 +57,14 @@ struct BoundaryContext {
 }
 
 impl BoundaryContext {
+    fn new(boundary: &[f32]) -> Self {
+        let vertices: Vec<[f32; 2]> = boundary
+            .chunks(2)
+            .map(|c| [c[0], c[1]])
+            .collect();
+        Self { vertices }
+    }
+
     fn len(&self) -> usize {
         self.vertices.len()
     }
@@ -111,22 +120,29 @@ fn signed_distance_to_bisector(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
 
 fn clip_polygon_by_neighbor(
     polygon: &[Vertex],
+    edge_neighbors: &[Option<usize>],
     site_pos: [f32; 2],
     neighbor_pos: [f32; 2],
+    neighbor_idx: usize,
     boundary: &BoundaryContext,
-) -> Vec<Vertex> {
+) -> (Vec<Vertex>, Vec<Option<usize>>) {
     if polygon.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    let mut result = Vec::new();
+    let mut new_polygon = Vec::new();
+    let mut new_edge_neighbors = Vec::new();
+
     let mut prev = polygon.last().unwrap().clone();
+    let mut prev_edge_neighbor = edge_neighbors.last().unwrap().clone();
+
     let mut prev_dist = signed_distance_to_bisector(prev.pos, site_pos, neighbor_pos);
     let mut prev_inside = prev_dist <= EDGE_TOLERANCE;
-    //let mut prev_inside = prev_dist == 0.0;
-    for current in polygon.iter() {
+
+    for (i, current) in polygon.iter().enumerate() {
         let curr_dist = signed_distance_to_bisector(current.pos, site_pos, neighbor_pos);
         let curr_inside = curr_dist <= EDGE_TOLERANCE;
-        //let curr_inside = curr_dist == 0.0;
+        let outgoing_neighbor = edge_neighbors[i];
+
         if curr_inside {
             if !prev_inside {
                 let vtx = intersect_segment(
@@ -136,9 +152,14 @@ fn clip_polygon_by_neighbor(
                     curr_dist,
                     boundary,
                 );
-                result.push(vtx);
+                new_polygon.push(vtx);
+                new_edge_neighbors.push(prev_edge_neighbor);
+                new_polygon.push(current.clone());
+                new_edge_neighbors.push(outgoing_neighbor);
+            } else {
+                new_polygon.push(current.clone());
+                new_edge_neighbors.push(outgoing_neighbor);
             }
-            result.push(current.clone());
         } else if prev_inside {
             let vtx = intersect_segment(
                 prev.clone(),
@@ -147,13 +168,63 @@ fn clip_polygon_by_neighbor(
                 curr_dist,
                 boundary,
             );
-            result.push(vtx);
+            new_polygon.push(vtx);
+            new_edge_neighbors.push(Some(neighbor_idx));
         }
         prev = current.clone();
         prev_dist = curr_dist;
         prev_inside = curr_inside;
+        prev_edge_neighbor = outgoing_neighbor;
     }
-    result
+
+    // Filter duplicates
+    let mut final_polygon: Vec<Vertex> = Vec::new();
+    let mut final_neighbors: Vec<Option<usize>> = Vec::new();
+
+    for i in 0..new_polygon.len() {
+        let v = &new_polygon[i];
+        let n = new_edge_neighbors[i];
+        
+        if let Some(last) = final_polygon.last() {
+             if distance(last.pos, v.pos) < 1.0e-5 {
+                 // Merge.
+                 // If the new vertex 'v' has better boundary info, replace 'last' with 'v'.
+                 // Priority: boundary_vertex > boundary_edge > None
+                 let last_score = if last.boundary_vertex.is_some() { 2 } else if last.boundary_edge.is_some() { 1 } else { 0 };
+                 let v_score = if v.boundary_vertex.is_some() { 2 } else if v.boundary_edge.is_some() { 1 } else { 0 };
+                 
+                 if v_score > last_score {
+                     *final_polygon.last_mut().unwrap() = v.clone();
+                 }
+
+                 // Update neighbor of last to n (outgoing edge from the merged vertex)
+                 *final_neighbors.last_mut().unwrap() = n;
+                 continue;
+             }
+        }
+        final_polygon.push(v.clone());
+        final_neighbors.push(n);
+    }
+    
+    // Check closure (last vs first)
+    if !final_polygon.is_empty() {
+        let first = &final_polygon[0];
+        let last = final_polygon.last().unwrap();
+        if distance(first.pos, last.pos) < 1.0e-5 {
+            let last_v = final_polygon.pop().unwrap();
+            final_neighbors.pop();
+
+            // Update first if last had better info
+            let first_score = if final_polygon[0].boundary_vertex.is_some() { 2 } else if final_polygon[0].boundary_edge.is_some() { 1 } else { 0 };
+            let last_score = if last_v.boundary_vertex.is_some() { 2 } else if last_v.boundary_edge.is_some() { 1 } else { 0 };
+            
+            if last_score > first_score {
+                final_polygon[0] = last_v;
+            }
+        }
+    }
+
+    (final_polygon, final_neighbors)
 }
 
 fn intersect_segment(
@@ -174,10 +245,11 @@ fn intersect_segment(
         start.pos[0] + (end.pos[0] - start.pos[0]) * t,
         start.pos[1] + (end.pos[1] - start.pos[1]) * t,
     ];
+
     if let Some(idx) = boundary.detect_vertex(pos) {
         return Vertex::new_boundary(idx, pos);
     }
-    let edge_anchor = detect_boundary_edge(&start, &end, boundary.len());
+    let edge_anchor = detect_boundary_edge(&start, &end, pos, boundary);
     Vertex {
         pos,
         boundary_vertex: None,
@@ -185,18 +257,86 @@ fn intersect_segment(
     }
 }
 
-fn detect_boundary_edge(a: &Vertex, b: &Vertex, boundary_len: usize) -> Option<usize> {
+fn detect_boundary_edge(
+    a: &Vertex,
+    b: &Vertex,
+    pos: [f32; 2],
+    boundary: &BoundaryContext,
+) -> Option<usize> {
+    let boundary_len = boundary.len();
+
     match (a.boundary_edge, b.boundary_edge) {
         (Some(e0), Some(e1)) if e0 == e1 => return Some(e0),
-        (Some(e0), None) => return Some(e0),
-        (None, Some(e1)) => return Some(e1),
         _ => {}
     }
-    match (a.boundary_vertex, b.boundary_vertex) {
-        (Some(i0), Some(i1)) if (i0 + 1) % boundary_len == i1 => Some(i0),
-        (Some(i0), Some(i1)) if (i1 + 1) % boundary_len == i0 => Some(i1),
-        _ => None,
+    
+    if let (Some(v), Some(e)) = (a.boundary_vertex, b.boundary_edge) {
+        if v == e || v == (e + 1) % boundary_len { return Some(e); }
     }
+    
+    if let (Some(e), Some(v)) = (a.boundary_edge, b.boundary_vertex) {
+        if v == e || v == (e + 1) % boundary_len { return Some(e); }
+    }
+
+    match (a.boundary_vertex, b.boundary_vertex) {
+        (Some(i0), Some(i1)) if (i0 + 1) % boundary_len == i1 => return Some(i0),
+        (Some(i0), Some(i1)) if (i1 + 1) % boundary_len == i0 => return Some(i1),
+        _ => {},
+    }
+
+    // Collinearity check
+    let on_boundary_a = a.boundary_edge.is_some() || a.boundary_vertex.is_some();
+    let on_boundary_b = b.boundary_edge.is_some() || b.boundary_vertex.is_some();
+
+    if on_boundary_a && on_boundary_b {
+        let edges_a = get_associated_edges(a, boundary_len);
+        let edges_b = get_associated_edges(b, boundary_len);
+
+        for &ea in &edges_a {
+            for &eb in &edges_b {
+                if are_edges_collinear(ea, eb, boundary) {
+                    if let Some(e) = boundary.detect_edge(pos) {
+                        return Some(e);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn get_associated_edges(v: &Vertex, len: usize) -> Vec<usize> {
+    let mut edges = Vec::new();
+    if let Some(e) = v.boundary_edge {
+        edges.push(e);
+    }
+    if let Some(i) = v.boundary_vertex {
+        edges.push(i);
+        edges.push((i + len - 1) % len);
+    }
+    edges
+}
+
+fn are_edges_collinear(e1: usize, e2: usize, boundary: &BoundaryContext) -> bool {
+    let p1_start = boundary.vertices[e1];
+    let p1_end = boundary.vertices[(e1 + 1) % boundary.len()];
+    
+    let p2_start = boundary.vertices[e2];
+    let p2_end = boundary.vertices[(e2 + 1) % boundary.len()];
+    
+    let dir1 = [p1_end[0] - p1_start[0], p1_end[1] - p1_start[1]];
+    let dir2 = [p2_end[0] - p2_start[0], p2_end[1] - p2_start[1]];
+    
+    let cross = dir1[0] * dir2[1] - dir1[1] * dir2[0];
+    if cross.abs() > 1.0e-4 {
+        return false;
+    }
+    
+    let dir_connect = [p2_start[0] - p1_start[0], p2_start[1] - p1_start[1]];
+    let cross_connect = dir1[0] * dir_connect[1] - dir1[1] * dir_connect[0];
+    
+    cross_connect.abs() < 1.0e-4
 }
 
 fn distance_sq_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> Option<f32> {
@@ -326,9 +466,11 @@ pub fn compute_delaunay_voronoi(
     let boundary_ctx = BoundaryContext {
         vertices: boundary_vertices,
     };
+    
     let boundary_area = polygon_area_points(&boundary_ctx.vertices);
 
     let mut site_positions: Vec<[f32; 2]> = site2xy.chunks(2).map(|c| [c[0], c[1]]).collect();
+    
     let fallback = boundary_ctx.centroid();
     let sanitized = sanitize_site_positions(&mut site_positions, fallback);
     if sanitized > 0 {
@@ -378,16 +520,23 @@ pub fn compute_delaunay_voronoi(
             .enumerate()
             .map(|(i, v)| Vertex::new_boundary(i, *v))
             .collect();
+        let mut edge_neighbors: Vec<Option<usize>> = vec![None; polygon.len()];
+
         for &neighbor in &neighbor_sets[site_idx] {
             if neighbor == site_idx || !alive[neighbor] {
                 continue;
             }
-            polygon = clip_polygon_by_neighbor(
+            let (new_poly, new_neighbors) = clip_polygon_by_neighbor(
                 &polygon,
+                &edge_neighbors,
                 site_positions[site_idx],
                 site_positions[neighbor],
+                neighbor,
                 &boundary_ctx,
             );
+            polygon = new_poly;
+            edge_neighbors = new_neighbors;
+
             if polygon.is_empty() {
                 break;
             }
@@ -401,7 +550,7 @@ pub fn compute_delaunay_voronoi(
                 polygon_is_full = true;
             }
         }
-        if polygon.len() < 3 || polygon_is_full {
+        if polygon.len() < 3 || polygon_is_full || cell_area.abs() < EPS_POS {
             debug_cells.push(Vec::new());
             site2idx.push(site2idx.last().copied().unwrap());
             continue;
@@ -420,6 +569,39 @@ pub fn compute_delaunay_voronoi(
             );
             edges_neighbors.push(neighbor);
         }
+
+        // Clean up redundant vertices (collinear edges with same neighbor)
+        if !polygon.is_empty() {
+            let mut clean_polygon = Vec::new();
+            let mut clean_edges_neighbors = Vec::new();
+            let len = polygon.len();
+            for i in 0..len {
+                let prev_idx = (i + len - 1) % len;
+                let prev_neigh = edges_neighbors[prev_idx];
+                let curr_neigh = edges_neighbors[i];
+                
+                if prev_neigh == curr_neigh {
+                    // Skip redundant vertex
+                    continue;
+                }
+                clean_polygon.push(polygon[i].clone());
+                clean_edges_neighbors.push(curr_neigh);
+            }
+            polygon = clean_polygon;
+            edges_neighbors = clean_edges_neighbors;
+        }
+
+        if polygon.len() < 3 {
+             if let Some(last) = debug_cells.last_mut() {
+                 last.clear();
+             }
+             site2idx.push(site2idx.last().copied().unwrap());
+             continue;
+        }
+        if let Some(last) = debug_cells.last_mut() {
+             *last = polygon.iter().map(|v| v.pos).collect();
+        }
+
         let mut cell_indices = Vec::with_capacity(polygon.len());
         for (i, vertex) in polygon.iter().enumerate() {
             let prev = if i == 0 {
@@ -434,6 +616,25 @@ pub fn compute_delaunay_voronoi(
                 edges_neighbors[i],
                 &boundary_ctx,
             );
+
+            // Check for degenerate info
+            if info[1] != usize::MAX && info[3] == usize::MAX && info[1] == info[2] {
+                 return Err(anyhow!(
+                    "degenerate boundary intersection: site={site_idx}, vertex={i}, info={info:?}, prev={:?}, next={:?}",
+                    edges_neighbors[prev],
+                    edges_neighbors[i]
+                ));
+            }
+            if info[0] == usize::MAX {
+                if info[1] == info[2] || info[1] == info[3] || info[2] == info[3] {
+                     return Err(anyhow!(
+                        "degenerate internal vertex: site={site_idx}, vertex={i}, info={info:?}, prev={:?}, next={:?}",
+                        edges_neighbors[prev],
+                        edges_neighbors[i]
+                    ));
+                }
+            }
+
             if info[1] == usize::MAX && info[0] >= boundary_ctx.len() {
                 return Err(anyhow!(
                     "boundary vertex info references invalid index: site={site_idx}, vertex={i}, info={info:?}, boundary_len={}",
@@ -461,16 +662,12 @@ pub fn compute_delaunay_voronoi(
         site2idx.push(current_len);
     }
 
-    println!("check vtxv2info...vtxv2info len : {}", vtxv2info.len());
-    std::io::stdout().flush().unwrap();
-
     let boundary_len = boundary_ctx.len();
+    println!("check vtxv2info...vtxv2info len : {}", vtxv2info.len());
     println!("boundary_len : {}", boundary_len);
     std::io::stdout().flush().unwrap();
 
     for (idx, info) in vtxv2info.iter().enumerate() {
-        //        println!( "idx : {}, info : {:?}" , idx, info);
-        //        std::io::stdout().flush().unwrap();
         if info[3] == usize::MAX && info[0] >= boundary_len {
             return Err(anyhow::anyhow!(
                 "invalid boundary reference for voronoi vertex {idx}: info={info:?}, boundary_len={boundary_len}"
@@ -557,6 +754,21 @@ fn build_neighbor_sets(tri: &Triangulation, num_sites: usize) -> Vec<Vec<usize>>
         }
     }
     sets.into_iter().map(|s| s.into_iter().collect()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_handles_nan_sites_by_sanitizing() {
+        let boundary = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+        let site2xy = vec![0.25, 0.25, f32::NAN, 0.75];
+        let alive = vec![true, true];
+        let result = compute_delaunay_voronoi(&boundary, &site2xy, &alive)
+            .expect("Voronoi diagram should handle NaN inputs");
+        assert_eq!(result.site2idx.len(), alive.len() + 1);
+    }
 }
 
 fn dump_svg_debug(path: &str, sites: &[[f32; 2]], boundary: &BoundaryContext, tri: &Triangulation) {
@@ -751,19 +963,4 @@ fn bounding_box(points: &[[f32; 2]]) -> Option<(f32, f32, f32, f32)> {
         max_y = max_y.max(p[1]);
     }
     Some((min_x, max_x, min_y, max_y))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compute_handles_nan_sites_by_sanitizing() {
-        let boundary = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
-        let site2xy = vec![0.25, 0.25, f32::NAN, 0.75];
-        let alive = vec![true, true];
-        let result = compute_delaunay_voronoi(&boundary, &site2xy, &alive)
-            .expect("Voronoi diagram should handle NaN inputs");
-        assert_eq!(result.site2idx.len(), alive.len() + 1);
-    }
 }
