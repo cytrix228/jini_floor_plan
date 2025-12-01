@@ -5,13 +5,26 @@ use del_canvas_core::canvas_gif::Canvas;
 use serde::Deserialize;
 use std::any::Any;
 use std::backtrace::Backtrace;
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 mod delaunay;
 pub mod loss_topo;
 mod voronoi;
 pub use voronoi::VoronoiBackend;
+
+const MY_PAINT_SVG_COLORS: [&str; 8] = [
+    "#e6194B",
+    "#3cb44b",
+    "#ffe119",
+    "#0082c8",
+    "#f58231",
+    "#911eb4",
+    "#46f0f0",
+    "#f032e6",
+];
 
 static PROJECT_PARAMS: OnceLock<Vec<ProjectParams>> = OnceLock::new();
 
@@ -357,6 +370,158 @@ pub fn my_paint(
     }
 
     std::io::stdout().flush().unwrap();
+
+    match dump_voronoi_svg_snapshot(vtxl2xy, site2xy, voronoi_info, vtxv2xy, site2room) {
+        Ok(Some(path)) => println!("[floorplan] Wrote Voronoi SVG to {}", path),
+        Ok(None) => {}
+        Err(err) => eprintln!("[floorplan] Failed to write Voronoi SVG: {}", err),
+    }
+}
+
+fn dump_voronoi_svg_snapshot(
+    vtxl2xy: &[f32],
+    site2xy: &[f32],
+    voronoi_info: &VoronoiInfo,
+    vtxv2xy: &[f32],
+    site2room: &[usize],
+) -> std::io::Result<Option<String>> {
+    if voronoi_info.site2idx.len() < 2 {
+        return Ok(None);
+    }
+    let mut cells: Vec<Vec<[f32; 2]>> = Vec::with_capacity(voronoi_info.site2idx.len() - 1);
+    let mut all_points: Vec<[f32; 2]> = Vec::new();
+    for chunk in vtxl2xy.chunks(2) {
+        if let [x, y] = chunk {
+            all_points.push([*x, *y]);
+        }
+    }
+    for chunk in site2xy.chunks(2) {
+        if let [x, y] = chunk {
+            all_points.push([*x, *y]);
+        }
+    }
+    for i_site in 0..voronoi_info.site2idx.len() - 1 {
+        let start = voronoi_info.site2idx[i_site];
+        let end = voronoi_info.site2idx[i_site + 1];
+        let mut cell = Vec::new();
+        for idx in start..end {
+            let i_vtxv = voronoi_info.idx2vtxv[idx];
+            let x = vtxv2xy.get(i_vtxv * 2).copied().unwrap_or(0.0);
+            let y = vtxv2xy.get(i_vtxv * 2 + 1).copied().unwrap_or(0.0);
+            let coord = [x, y];
+            all_points.push(coord);
+            cell.push(coord);
+        }
+        cells.push(cell);
+    }
+    let bounds = match bounding_box(&all_points) {
+        Some(b) => b,
+        None => return Ok(None),
+    };
+    let (min_x, max_x, min_y, max_y) = bounds;
+    let margin = ((max_x - min_x).max(max_y - min_y)).max(1.0e-3) * 0.05;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|dur| dur.as_millis())
+        .unwrap_or_default();
+    let path = format!("target/voronoi_runtime_{}.svg", timestamp);
+    if let Some(parent) = Path::new(&path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = File::create(&path)?;
+    let width = max_x - min_x + margin * 2.0;
+    let height = max_y - min_y + margin * 2.0;
+    writeln!(
+        file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\">",
+        min_x - margin,
+        min_y - margin,
+        width,
+        height
+    )?;
+    if vtxl2xy.len() >= 4 {
+        let mut poly = String::new();
+        for chunk in vtxl2xy.chunks(2) {
+            if let [x, y] = chunk {
+                poly.push_str(&format!("{} {},", x, y));
+            }
+        }
+        writeln!(
+            file,
+            "<polygon points=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"{}\"/>",
+            poly.trim_end_matches(','),
+            width * 0.002
+        )?;
+    }
+    for (site_idx, cell) in cells.iter().enumerate() {
+        if cell.len() < 2 {
+            continue;
+        }
+        let mut poly = String::new();
+        for [x, y] in cell {
+            poly.push_str(&format!("{} {},", x, y));
+        }
+        let room = site2room.get(site_idx).copied().unwrap_or(usize::MAX);
+        let color = if room == usize::MAX {
+            "#999999"
+        } else {
+            MY_PAINT_SVG_COLORS[room % MY_PAINT_SVG_COLORS.len()]
+        };
+        writeln!(
+            file,
+            "<polygon points=\"{}\" fill=\"{}\" fill-opacity=\"0.15\" stroke=\"{}\" stroke-width=\"{}\"/>",
+            poly.trim_end_matches(','),
+            color,
+            color,
+            width * 0.0015
+        )?;
+    }
+    for (idx, chunk) in site2xy.chunks(2).enumerate() {
+        if let [x, y] = chunk {
+            writeln!(
+                file,
+                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"#111\" fill-opacity=\"0.8\"/>",
+                x,
+                y,
+                width * 0.0025
+            )?;
+            writeln!(
+                file,
+                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"#000\">{}</text>",
+                x + width * 0.002,
+                y - width * 0.002,
+                width * 0.005,
+                idx
+            )?;
+        }
+    }
+    writeln!(file, "</svg>")?;
+    Ok(Some(path))
+}
+
+fn bounding_box(points: &[[f32; 2]]) -> Option<(f32, f32, f32, f32)> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut min_x = points[0][0];
+    let mut max_x = points[0][0];
+    let mut min_y = points[0][1];
+    let mut max_y = points[0][1];
+    for [x, y] in points.iter().skip(1) {
+        if *x < min_x {
+            min_x = *x;
+        }
+        if *x > max_x {
+            max_x = *x;
+        }
+        if *y < min_y {
+            min_y = *y;
+        }
+        if *y > max_y {
+            max_y = *y;
+        }
+    }
+    Some((min_x, max_x, min_y, max_y))
 }
 
 pub fn draw_svg(
@@ -1080,7 +1245,7 @@ pub(crate) fn iterate_voronoi_stage(
         vtxl2xy,
         &site2xy_adjusted,
         site2room,
-        VoronoiBackend::Delaunay,
+        VoronoiBackend::Legacy,
         )?;
 
     println!(
@@ -1213,9 +1378,6 @@ pub(crate) fn optimize_iteration(
         site_coords_sanitized,
     ))
 }
-
-use std::io::Write;
-
 fn optimize_phase(
     canvas_gif: &mut del_canvas_core::canvas_gif::Canvas,
     transform_world2pix: &nalgebra::Matrix3<f32>,
