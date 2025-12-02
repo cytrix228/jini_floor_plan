@@ -1,3 +1,35 @@
+const NORMALIZED_CENTER: [f32; 2] = [0.5, 0.5];
+const DEFAULT_COORD_SCALE: f32 = 1.0;
+const SCALE_ENV_VAR: &str = "FLOORPLAN_COORD_SCALE";
+
+fn coordinate_scale_factor() -> f32 {
+    std::env::var(SCALE_ENV_VAR)
+        .ok()
+        .and_then(|raw| raw.parse::<f32>().ok())
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
+        .unwrap_or(DEFAULT_COORD_SCALE)
+}
+
+fn scale_coords_about_center(coords: &mut [f32], center: [f32; 2], scale: f32) {
+    if !scale.is_finite() || (scale - 1.0).abs() <= f32::EPSILON {
+        return;
+    }
+    for chunk in coords.chunks_exact_mut(2) {
+        chunk[0] = (chunk[0] - center[0]) * scale + center[0];
+        chunk[1] = (chunk[1] - center[1]) * scale + center[1];
+    }
+}
+
+fn scale_point_about_center(point: [f32; 2], center: [f32; 2], scale: f32) -> [f32; 2] {
+    if !scale.is_finite() || (scale - 1.0).abs() <= f32::EPSILON {
+        return point;
+    }
+    [
+        (point[0] - center[0]) * scale + center[0],
+        (point[1] - center[1]) * scale + center[1],
+    ]
+}
+
 fn problem(
     seed: u64,
 ) -> (
@@ -9,6 +41,16 @@ fn problem(
     Vec<i32>,
     Vec<(usize, usize)>,
 ) {
+    let coord_scale = coordinate_scale_factor();
+    if (coord_scale - 1.0).abs() > f32::EPSILON {
+        println!(
+            "[3_duck] Applying coordinate scale factor {} after normalization",
+            coord_scale
+        );
+    }
+
+    dbg!(coord_scale);
+
     use rand::SeedableRng;
     let mut reng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
     let num_room = 6;
@@ -45,7 +87,8 @@ fn problem(
             del_msh_core::io_svg::polybezier2polyloop(&loops[0].0, &loops[0].1, loops[0].2, 300.);
         let mut vtxl2xy_flat: Vec<f32> = vtxl2xy.iter().flat_map(|p| [p[0], p[1]]).collect();
         vtxl2xy_flat = del_msh_core::polyloop::resample::<f32, 2>(&vtxl2xy_flat, 100);
-        vtxl2xy_flat = del_msh_core::vtx2xy::normalize(&vtxl2xy_flat, &[0.5, 0.5], 1.0);
+        vtxl2xy_flat = del_msh_core::vtx2xy::normalize(&vtxl2xy_flat, &NORMALIZED_CENTER, 1.0);
+        scale_coords_about_center(&mut vtxl2xy_flat, NORMALIZED_CENTER, coord_scale);
         {
             let mut min_x = vtxl2xy_flat[0];
             let mut max_x = vtxl2xy_flat[0];
@@ -59,13 +102,16 @@ fn problem(
                 min_y = min_y.min(y);
                 max_y = max_y.max(y);
             }
-            println!("Boundary bounds: x=[{}, {}], y=[{}, {}]", min_x, max_x, min_y, max_y);
+            println!(
+                "Boundary bounds: x=[{}, {}], y=[{}, {}]",
+                min_x, max_x, min_y, max_y
+            );
         }
         dbg!(vtxl2xy_flat.len());
         let _ = del_msh_core::io_obj::save_vtx2xyz_as_polyloop("target/loop.obj", &vtxl2xy_flat, 2);
         vtxl2xy_flat
     };
-    dbg!(&vtxl2xy);
+    //dbg!(&vtxl2xy);
     let area_ratio = [0.4, 0.2, 0.2, 0.2, 0.2, 0.1];
     let room2area_trg: Vec<f32> = {
         let total_area = del_msh_core::polyloop2::area(&vtxl2xy);
@@ -78,17 +124,23 @@ fn problem(
     dbg!(&room2area_trg);
     //
     let (site2xy, site2xy2flag, site2room) = {
-        let mut site2xy =
-            del_msh_core::polyloop2::poisson_disk_sampling(&vtxl2xy, 0.03, 50, &mut reng);
+        let mut site2xy = del_msh_core::polyloop2::poisson_disk_sampling(
+            &vtxl2xy,
+            0.03 * coord_scale,
+            200,
+            &mut reng,
+        );
         let mut site2xy2flag = vec![0f32; site2xy.len()];
         let mut site2room = floorplan::site2room(
             site2xy.len() / 2,
             &room2area_trg[0..room2area_trg.len() - 1],
         );
-        site2xy.extend([0.48, 0.06]);
+        let anchor_a = scale_point_about_center([0.48, 0.06], NORMALIZED_CENTER, coord_scale);
+        site2xy.extend_from_slice(&anchor_a);
         site2xy2flag.extend([1., 1.]);
         site2room.push(room2area_trg.len() - 1);
-        site2xy.extend([0.52, 0.06]);
+        let anchor_b = scale_point_about_center([0.52, 0.06], NORMALIZED_CENTER, coord_scale);
+        site2xy.extend_from_slice(&anchor_b);
         site2xy2flag.extend([1., 1.]);
         site2room.push(room2area_trg.len() - 1);
         (site2xy, site2xy2flag, site2room)
@@ -116,7 +168,7 @@ fn main() -> anyhow::Result<()> {
         for i_room in 0..num_room {
             palette.push(room2color[i_room]);
         }
-        del_canvas_core::canvas_gif::Canvas::new("target/3_duck.gif", (300, 300), &palette)
+        del_canvas_core::canvas_gif::Canvas::new("target/3_duck.gif", (1000, 1000), &palette)
     };
     floorplan::optimize(
         &mut canvas_gif,
@@ -127,7 +179,7 @@ fn main() -> anyhow::Result<()> {
         room2area_trg,
         room2color,
         room_connections,
-        400,
+        500,
         0,
     )?;
     Ok(())

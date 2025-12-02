@@ -11,19 +11,13 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 mod delaunay;
+pub mod fracture;
 pub mod loss_topo;
 mod voronoi;
 pub use voronoi::VoronoiBackend;
 
 const MY_PAINT_SVG_COLORS: [&str; 8] = [
-    "#e6194B",
-    "#3cb44b",
-    "#ffe119",
-    "#0082c8",
-    "#f58231",
-    "#911eb4",
-    "#46f0f0",
-    "#f032e6",
+    "#e6194B", "#3cb44b", "#ffe119", "#0082c8", "#f58231", "#911eb4", "#46f0f0", "#f032e6",
 ];
 
 static PROJECT_PARAMS: OnceLock<Vec<ProjectParams>> = OnceLock::new();
@@ -73,12 +67,15 @@ impl LossWeights {
     const fn default_fix() -> f32 {
         50.0
     }
+
     const fn default_lloyd() -> f32 {
         0.5
     }
+
     const fn default_each_area() -> f32 {
         5.0
     }
+
     const fn default_total_area() -> f32 {
         20.0
     }
@@ -202,55 +199,54 @@ pub fn my_paint(
 ) {
     let site2idx = &voronoi_info.site2idx;
     let idx2vtxv = &voronoi_info.idx2vtxv;
-    //println!( "\n");
+    let idx2site = &voronoi_info.idx2site;
+    let site_count = site2idx.len().saturating_sub(1);
+    if site_count == 0 {
+        return;
+    }
 
-    let mut colors = Vec::<u8>::new();
-    //
-    for i_site in 0..site2idx.len() - 1 {
+    let transform = arrayref::array_ref![transform_to_scr.as_slice(), 0, 9];
+    let max_site_vertices = site2idx
+        .windows(2)
+        .map(|window| window[1] - window[0])
+        .max()
+        .unwrap_or(0);
+    let mut polygon_xy = vec![0f32; max_site_vertices.saturating_mul(2)];
+    #[cfg(debug_assertions)]
+    let mut skipped_sites = 0usize;
+
+    for i_site in 0..site_count {
         let i_room = site2room[i_site];
         if i_room == usize::MAX {
-            println!(
-                "Skipping site {} with no room assignment in my_paint",
-                i_site
-            );
-            //flush
-            std::io::stdout().flush().unwrap();
+            #[cfg(debug_assertions)]
+            {
+                skipped_sites += 1;
+            }
             continue;
         }
         //
-        let i_color: u8 = if i_room == usize::MAX {
-            println!(
-                "Coloring site with 1 {} with no room assignment in my_paint",
-                i_site
-            );
-            //flush
-            std::io::stdout().flush().unwrap();
-            1
-        } else {
-            (i_room + 2).try_into().unwrap()
-        };
-
-        colors.push(i_color);
-
-        //        println!( "Painting site {} with color {}", i_site, i_color);
-        //flush
-        //        std::io::stdout().flush().unwrap();
+        let i_color: u8 = (i_room + 2).try_into().unwrap();
 
         let num_vtx_in_site = site2idx[i_site + 1] - site2idx[i_site];
         if num_vtx_in_site == 0 {
             continue;
         }
-        let mut vtx2xy = vec![0f32; num_vtx_in_site * 2];
-        for i_vtx in 0..num_vtx_in_site {
-            let i_vtxv = idx2vtxv[site2idx[i_site] + i_vtx];
-            vtx2xy[i_vtx * 2 + 0] = vtxv2xy[i_vtxv * 2 + 0];
-            vtx2xy[i_vtx * 2 + 1] = vtxv2xy[i_vtxv * 2 + 1];
+        let start = site2idx[i_site];
+        let end = site2idx[i_site + 1];
+        let site_vertices = &idx2vtxv[start..end];
+        let slice_len = num_vtx_in_site * 2;
+        {
+            let slice = &mut polygon_xy[..slice_len];
+            for (dst, &i_vtxv) in slice.chunks_exact_mut(2).zip(site_vertices.iter()) {
+                dst[0] = vtxv2xy[i_vtxv * 2];
+                dst[1] = vtxv2xy[i_vtxv * 2 + 1];
+            }
         }
         del_canvas_core::rasterize_polygon::fill(
             &mut canvas.data,
             canvas.width,
-            &vtx2xy,
-            arrayref::array_ref![transform_to_scr.as_slice(), 0, 9],
+            &polygon_xy[..slice_len],
+            transform,
             i_color,
         );
         /*
@@ -273,25 +269,25 @@ pub fn my_paint(
          */
     }
 
-    //println!("Colors: {:?}", colors);
-    //std::io::stdout().flush().unwrap();
+    #[cfg(debug_assertions)]
+    if skipped_sites > 0 {
+        eprintln!(
+            "[floorplan] Skipped {skipped_sites} site(s) with no room assignment during my_paint"
+        );
+    }
 
     // draw points;
-    for i_site in 0..site2xy.len() / 2 {
+    for (i_site, site_xy) in site2xy.chunks_exact(2).enumerate() {
+        let &[x, y] = site_xy else { unreachable!() };
         let i_room = site2room[i_site];
         if i_room == usize::MAX {
             continue;
         }
-        let _i_color: u8 = if i_room == usize::MAX {
-            1
-        } else {
-            (i_room + 2).try_into().unwrap()
-        };
         del_canvas_core::rasterize_circle::fill(
             &mut canvas.data,
             canvas.width,
-            &[site2xy[i_site * 2 + 0], site2xy[i_site * 2 + 1]],
-            arrayref::array_ref![transform_to_scr.as_slice(), 0, 9],
+            &[x, y],
+            transform,
             2.0,
             // black dot
             255, //i_color,
@@ -301,48 +297,43 @@ pub fn my_paint(
     // print check point time
     // println!("Check point time: {:?} at draw cell boundary", std::time::Instant::now());
 
-    // draw cell boundary
-    for i_site in 0..site2idx.len() - 1 {
-        let num_vtx_in_site = site2idx[i_site + 1] - site2idx[i_site];
-        for i0_vtx in 0..num_vtx_in_site {
-            let i1_vtx = (i0_vtx + 1) % num_vtx_in_site;
-            let i0 = idx2vtxv[site2idx[i_site] + i0_vtx];
-            let i1 = idx2vtxv[site2idx[i_site] + i1_vtx];
+    // draw cell boundary once per shared Voronoi edge
+    for i_site in 0..site_count {
+        let start = site2idx[i_site];
+        let end = site2idx[i_site + 1];
+        let num_vtx_in_site = end - start;
+        if num_vtx_in_site == 0 {
+            continue;
+        }
+        for (local_idx, edge_idx) in (start..end).enumerate() {
+            let neighbor_site = idx2site[edge_idx];
+            if neighbor_site != usize::MAX && neighbor_site < i_site {
+                continue;
+            }
+            let next_local = (local_idx + 1) % num_vtx_in_site;
+            let i0 = idx2vtxv[edge_idx];
+            let i1 = idx2vtxv[start + next_local];
             let p0 = &[vtxv2xy[i0 * 2 + 0], vtxv2xy[i0 * 2 + 1]];
             let p1 = &[vtxv2xy[i1 * 2 + 0], vtxv2xy[i1 * 2 + 1]];
-            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                del_canvas_core::rasterize_line::draw_dda_with_transformation(
-                    &mut canvas.data,
-                    canvas.width,
-                    p0,
-                    p1,
-                    arrayref::array_ref![transform_to_scr.as_slice(), 0, 9],
-                    1,
-                );
-            })) {
-                let bt = Backtrace::force_capture();
-                eprintln!(
-                    "[floorplan] rasterize_line::draw_dda_with_transformation panicked (i_site={i_site}, i0_vtx={i0_vtx}, i1_vtx={i1_vtx}, i0={i0}, i1={i1}, p0={p0:?}, p1={p1:?},\n)\n{}\n{}",
-                    panic_payload_to_string(payload.as_ref()),
-                    bt
-                );
-                std::process::exit(1);
-            }
+            draw_site_edge_line(
+                canvas, transform, p0, p1, i_site, local_idx, next_local, i0, i1,
+            );
         }
     }
 
     // println!("Check point time: {:?} at draw room boundary", std::time::Instant::now());
 
     // draw room boundary
-    for i_edge in 0..edge2vtxv_wall.len() / 2 {
-        let i0_vtxv = edge2vtxv_wall[i_edge * 2 + 0];
-        let i1_vtxv = edge2vtxv_wall[i_edge * 2 + 1];
+    for edge in edge2vtxv_wall.chunks_exact(2) {
+        let &[i0_vtxv, i1_vtxv] = edge else {
+            unreachable!()
+        };
         del_canvas_core::rasterize_line::draw_pixcenter(
             &mut canvas.data,
             canvas.width,
             &[vtxv2xy[i0_vtxv * 2 + 0], vtxv2xy[i0_vtxv * 2 + 1]],
             &[vtxv2xy[i1_vtxv * 2 + 0], vtxv2xy[i1_vtxv * 2 + 1]],
-            arrayref::array_ref![transform_to_scr.as_slice(), 0, 9],
+            transform,
             1.6,
             1,
         );
@@ -350,12 +341,77 @@ pub fn my_paint(
 
     // println!("Check point time: {:?} at rasterize polygon stroke", std::time::Instant::now());
 
+    stroke_layout_outline(canvas, vtxl2xy, transform);
+
+    // match dump_voronoi_svg_snapshot(vtxl2xy, site2xy, voronoi_info, vtxv2xy, site2room, 1000.0) {
+    //     Ok(Some(path)) => println!("[floorplan] Wrote Voronoi SVG to {}", path),
+    //     Ok(None) => {}
+    //     Err(err) => eprintln!("[floorplan] Failed to write Voronoi SVG: {}", err),
+    // }
+}
+
+#[cfg(debug_assertions)]
+fn draw_site_edge_line(
+    canvas: &mut Canvas,
+    transform: &[f32; 9],
+    p0: &[f32; 2],
+    p1: &[f32; 2],
+    i_site: usize,
+    i0_vtx: usize,
+    i1_vtx: usize,
+    i0: usize,
+    i1: usize,
+) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        del_canvas_core::rasterize_line::draw_dda_with_transformation(
+            &mut canvas.data,
+            canvas.width,
+            p0,
+            p1,
+            transform,
+            1,
+        );
+    })) {
+        let bt = Backtrace::force_capture();
+        eprintln!(
+            "[floorplan] rasterize_line::draw_dda_with_transformation panicked (i_site={i_site}, i0_vtx={i0_vtx}, i1_vtx={i1_vtx}, i0={i0}, i1={i1}, p0={p0:?}, p1={p1:?})\n{}\n{}",
+            panic_payload_to_string(payload.as_ref()),
+            bt
+        );
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn draw_site_edge_line(
+    canvas: &mut Canvas,
+    transform: &[f32; 9],
+    p0: &[f32; 2],
+    p1: &[f32; 2],
+    _i_site: usize,
+    _i0_vtx: usize,
+    _i1_vtx: usize,
+    _i0: usize,
+    _i1: usize,
+) {
+    del_canvas_core::rasterize_line::draw_dda_with_transformation(
+        &mut canvas.data,
+        canvas.width,
+        p0,
+        p1,
+        transform,
+        1,
+    );
+}
+
+#[cfg(debug_assertions)]
+fn stroke_layout_outline(canvas: &mut Canvas, vtxl2xy: &[f32], transform: &[f32; 9]) {
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         del_canvas_core::rasterize_polygon::stroke(
             &mut canvas.data,
             canvas.width,
-            &vtxl2xy,
-            arrayref::array_ref![transform_to_scr.as_slice(), 0, 9],
+            vtxl2xy,
+            transform,
             1.6,
             1,
         );
@@ -368,14 +424,18 @@ pub fn my_paint(
         );
         std::process::exit(1);
     }
+}
 
-    std::io::stdout().flush().unwrap();
-
-    match dump_voronoi_svg_snapshot(vtxl2xy, site2xy, voronoi_info, vtxv2xy, site2room) {
-        Ok(Some(path)) => println!("[floorplan] Wrote Voronoi SVG to {}", path),
-        Ok(None) => {}
-        Err(err) => eprintln!("[floorplan] Failed to write Voronoi SVG: {}", err),
-    }
+#[cfg(not(debug_assertions))]
+fn stroke_layout_outline(canvas: &mut Canvas, vtxl2xy: &[f32], transform: &[f32; 9]) {
+    del_canvas_core::rasterize_polygon::stroke(
+        &mut canvas.data,
+        canvas.width,
+        vtxl2xy,
+        transform,
+        1.6,
+        1,
+    );
 }
 
 fn dump_voronoi_svg_snapshot(
@@ -384,10 +444,16 @@ fn dump_voronoi_svg_snapshot(
     voronoi_info: &VoronoiInfo,
     vtxv2xy: &[f32],
     site2room: &[usize],
+    scaleup: f32,
 ) -> std::io::Result<Option<String>> {
     if voronoi_info.site2idx.len() < 2 {
         return Ok(None);
     }
+    let scale = if scaleup.is_finite() && scaleup > 0.0 {
+        scaleup
+    } else {
+        1.0
+    };
     let mut cells: Vec<Vec<[f32; 2]>> = Vec::with_capacity(voronoi_info.site2idx.len() - 1);
     let mut all_points: Vec<[f32; 2]> = Vec::new();
     for chunk in vtxl2xy.chunks(2) {
@@ -429,21 +495,22 @@ fn dump_voronoi_svg_snapshot(
         std::fs::create_dir_all(parent)?;
     }
     let mut file = File::create(&path)?;
-    let width = max_x - min_x + margin * 2.0;
-    let height = max_y - min_y + margin * 2.0;
+    let width_unscaled = max_x - min_x + margin * 2.0;
+    let height_unscaled = max_y - min_y + margin * 2.0;
+    let width = width_unscaled * scale;
+    let height = height_unscaled * scale;
+    let view_min_x = (min_x - margin) * scale;
+    let view_min_y = (min_y - margin) * scale;
     writeln!(
         file,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\">",
-        min_x - margin,
-        min_y - margin,
-        width,
-        height
+        view_min_x, view_min_y, width, height
     )?;
     if vtxl2xy.len() >= 4 {
         let mut poly = String::new();
         for chunk in vtxl2xy.chunks(2) {
             if let [x, y] = chunk {
-                poly.push_str(&format!("{} {},", x, y));
+                poly.push_str(&format!("{} {},", x * scale, y * scale));
             }
         }
         writeln!(
@@ -459,7 +526,7 @@ fn dump_voronoi_svg_snapshot(
         }
         let mut poly = String::new();
         for [x, y] in cell {
-            poly.push_str(&format!("{} {},", x, y));
+            poly.push_str(&format!("{} {},", x * scale, y * scale));
         }
         let room = site2room.get(site_idx).copied().unwrap_or(usize::MAX);
         let color = if room == usize::MAX {
@@ -478,18 +545,20 @@ fn dump_voronoi_svg_snapshot(
     }
     for (idx, chunk) in site2xy.chunks(2).enumerate() {
         if let [x, y] = chunk {
+            let x_scaled = x * scale;
+            let y_scaled = y * scale;
             writeln!(
                 file,
                 "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"#111\" fill-opacity=\"0.8\"/>",
-                x,
-                y,
+                x_scaled,
+                y_scaled,
                 width * 0.0025
             )?;
             writeln!(
                 file,
                 "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"#000\">{}</text>",
-                x + width * 0.002,
-                y - width * 0.002,
+                x_scaled + width * 0.002,
+                y_scaled - width * 0.002,
                 width * 0.005,
                 idx
             )?;
@@ -1100,12 +1169,64 @@ fn boundary_centroid(vtxl2xy: &[f32]) -> [f32; 2] {
     [sum_x * inv, sum_y * inv]
 }
 
+fn coordinate_bounds(vtxl2xy: &[f32], site_positions: &[[f32; 2]]) -> (f32, f32, f32, f32) {
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for chunk in vtxl2xy.chunks(2) {
+        if chunk.len() < 2 {
+            continue;
+        }
+        min_x = min_x.min(chunk[0]);
+        max_x = max_x.max(chunk[0]);
+        min_y = min_y.min(chunk[1]);
+        max_y = max_y.max(chunk[1]);
+    }
+
+    for pos in site_positions {
+        min_x = min_x.min(pos[0]);
+        max_x = max_x.max(pos[0]);
+        min_y = min_y.min(pos[1]);
+        max_y = max_y.max(pos[1]);
+    }
+
+    if !min_x.is_finite() || !max_x.is_finite() || !min_y.is_finite() || !max_y.is_finite() {
+        return (0.0, 1.0, 0.0, 1.0);
+    }
+
+    if (max_x - min_x).abs() < 1.0e-6 {
+        max_x = min_x + 1.0;
+    }
+    if (max_y - min_y).abs() < 1.0e-6 {
+        max_y = min_y + 1.0;
+    }
+
+    (min_x, max_x, min_y, max_y)
+}
+
+fn merge_vertex(vertices: &mut Vec<[f32; 2]>, candidate: [f32; 2], eps: f32) -> usize {
+    for (idx, existing) in vertices.iter().enumerate() {
+        if (existing[0] - candidate[0]).abs() <= eps && (existing[1] - candidate[1]).abs() <= eps {
+            return idx;
+        }
+    }
+    vertices.push(candidate);
+    vertices.len() - 1
+}
+
 fn build_voronoi_geometry(
     vtxl2xy: &[f32],
     site2xy: &candle_core::Tensor,
     site2room: &[usize],
     backend: VoronoiBackend,
-) -> anyhow::Result<(candle_core::Tensor, candle_core::Tensor, VoronoiInfo, Vec<f32>)> {
+) -> anyhow::Result<(
+    candle_core::Tensor,
+    candle_core::Tensor,
+    VoronoiInfo,
+    Vec<f32>,
+)> {
     let alive: Vec<bool> = site2room.iter().map(|room| *room != usize::MAX).collect();
     let site_coords_raw = site2xy.flatten_all()?.to_vec1::<f32>()?;
     let mut site_positions: Vec<[f32; 2]> = site_coords_raw
@@ -1136,11 +1257,8 @@ fn build_voronoi_geometry(
         delta.push(diff);
     }
     let site2xy_sanitized = if has_delta {
-        let delta_tensor = candle_core::Tensor::from_vec(
-            delta,
-            site2xy.shape().clone(),
-            site2xy.device(),
-        )?;
+        let delta_tensor =
+            candle_core::Tensor::from_vec(delta, site2xy.shape().clone(), site2xy.device())?;
         site2xy.add(&delta_tensor)?
     } else {
         site2xy.clone()
@@ -1185,6 +1303,122 @@ fn build_voronoi_geometry(
                 idx2vtxv: voronoi_mesh.idx2vtxv,
                 idx2site,
                 vtxv2info: voronoi_mesh.vtxv2info,
+            };
+            Ok((site2xy_sanitized, vtxv2xy, info, site_coords))
+        }
+        VoronoiBackend::Fracture => {
+            let (min_x, max_x, min_y, max_y) = coordinate_bounds(vtxl2xy, &site_positions);
+            let width = (max_x - min_x).abs().max(1.0e-3) as f64;
+            let height = (max_y - min_y).abs().max(1.0e-3) as f64;
+            let offset_x = min_x as f64;
+            let offset_y = min_y as f64;
+
+            let mut fracture_sites = Vec::new();
+            let mut index_map = Vec::new();
+            for (idx, pos) in site_positions.iter().enumerate() {
+                if !alive[idx] {
+                    continue;
+                }
+                fracture_sites.push(crate::fracture::Point::new(
+                    (pos[0] - min_x) as f64,
+                    (pos[1] - min_y) as f64,
+                ));
+                index_map.push(idx);
+            }
+
+            if fracture_sites.len() < 3 {
+                return Err(anyhow::anyhow!(
+                    "Fracture backend requires at least three active sites"
+                ));
+            }
+
+            let boundary_points = if vtxl2xy.len() >= 6 {
+                let mut pts = Vec::with_capacity(vtxl2xy.len() / 2);
+                for chunk in vtxl2xy.chunks(2) {
+                    pts.push(crate::fracture::Point::new(
+                        (chunk[0] - min_x) as f64,
+                        (chunk[1] - min_y) as f64,
+                    ));
+                }
+                if pts.len() >= 3 {
+                    Some(pts)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let mut seed = index_map.len() as u64;
+            seed = seed
+                .wrapping_mul(636_413_622_384_679_3005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let mut rng = crate::fracture::Rng::new(seed);
+            let (cells, _) = crate::fracture::compute_voronoi_fracture(
+                fracture_sites,
+                width,
+                height,
+                boundary_points.as_deref(),
+                &mut rng,
+            );
+
+            let mut site_polys = vec![Vec::<[f32; 2]>::new(); site_positions.len()];
+            for cell in cells {
+                let Some(&global_idx) = index_map.get(cell.site_index) else {
+                    continue;
+                };
+                if cell.vertices.len() < 3 {
+                    continue;
+                }
+                let mut poly = Vec::with_capacity(cell.vertices.len());
+                for vertex in cell.vertices {
+                    poly.push([(vertex.x + offset_x) as f32, (vertex.y + offset_y) as f32]);
+                }
+                site_polys[global_idx] = poly;
+            }
+
+            if site_polys.iter().all(|poly| poly.len() < 3) {
+                return Err(anyhow::anyhow!(
+                    "Fracture backend did not produce any valid Voronoi cells"
+                ));
+            }
+
+            const MERGE_EPS: f32 = 1.0e-4;
+            let mut vertices: Vec<[f32; 2]> = Vec::new();
+            let mut site2idx = Vec::with_capacity(site_polys.len() + 1);
+            let mut idx2vtxv = Vec::new();
+            site2idx.push(0);
+            for poly in &site_polys {
+                for &pt in poly {
+                    let idx = merge_vertex(&mut vertices, pt, MERGE_EPS);
+                    idx2vtxv.push(idx);
+                }
+                site2idx.push(idx2vtxv.len());
+            }
+
+            if vertices.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Fracture backend failed to generate Voronoi vertices"
+                ));
+            }
+
+            let mut flat_vertices = Vec::with_capacity(vertices.len() * 2);
+            for v in &vertices {
+                flat_vertices.push(v[0]);
+                flat_vertices.push(v[1]);
+            }
+            let vtxv2xy = candle_core::Tensor::from_vec(
+                flat_vertices,
+                candle_core::Shape::from((vertices.len(), 2)),
+                site2xy.device(),
+            )?;
+            let idx2site =
+                del_msh_core::elem2elem::from_polygon_mesh(&site2idx, &idx2vtxv, vertices.len());
+            let info = VoronoiInfo {
+                site2idx,
+                idx2vtxv,
+                idx2site,
+                vtxv2info: vec![[usize::MAX; 4]; vertices.len()],
             };
             Ok((site2xy_sanitized, vtxv2xy, info, site_coords))
         }
@@ -1234,25 +1468,25 @@ pub(crate) fn iterate_voronoi_stage(
         }
     }
 
-    println!(
-        "Check point time: {:?} at start build_voronoi_geometry",
-        std::time::Instant::now()
-    );
-    std::io::stdout().flush().unwrap();
+    // println!(
+    //     "Check point time: {:?} at start build_voronoi_geometry",
+    //     std::time::Instant::now()
+    // );
+    // std::io::stdout().flush().unwrap();
 
-    let (site2xy_sanitized, vtxv2xy, voronoi_info, site_coords_sanitized) =
-        build_voronoi_geometry(
+    let (site2xy_sanitized, vtxv2xy, voronoi_info, site_coords_sanitized) = build_voronoi_geometry(
         vtxl2xy,
         &site2xy_adjusted,
         site2room,
-        VoronoiBackend::Legacy,
-        )?;
+        //        VoronoiBackend::Legacy,
+        VoronoiBackend::Fracture,
+    )?;
 
-    println!(
-        "Check point time: {:?} at end build_voronoi_geometry",
-        std::time::Instant::now()
-    );
-    std::io::stdout().flush().unwrap();
+    // println!(
+    //     "Check point time: {:?} at end build_voronoi_geometry",
+    //     std::time::Instant::now()
+    // );
+    // std::io::stdout().flush().unwrap();
 
     Ok(VoronoiStage {
         site2xy_adjusted: site2xy_sanitized,
@@ -1342,8 +1576,12 @@ pub(crate) fn optimize_iteration(
     let loss_topo = loss_topo.affine(loss_weights.topology as f64, 0.0)?;
     let loss_fix = loss_fix.affine(loss_weights.fix as f64, 0.0)?;
     let loss_lloyd = loss_lloyd.affine(loss_weights.lloyd as f64, 0.0)?;
-    let loss =
-        (&loss_each_area + &loss_total_area + &loss_walllen + &loss_topo + &loss_fix + &loss_lloyd)?;
+    let loss = (&loss_each_area
+        + &loss_total_area
+        + &loss_walllen
+        + &loss_topo
+        + &loss_fix
+        + &loss_lloyd)?;
 
     // Check for NaN loss
     let loss_scalar = loss.to_scalar::<f32>()?;
@@ -1358,17 +1596,17 @@ pub(crate) fn optimize_iteration(
         return Err(anyhow::anyhow!("Loss is not finite"));
     }
 
-    println!(
-        "Check point time: {:?} at start backward_step",
-        std::time::Instant::now()
-    );
-    std::io::stdout().flush().unwrap();
+    // println!(
+    //     "Check point time: {:?} at start backward_step",
+    //     std::time::Instant::now()
+    // );
+    // std::io::stdout().flush().unwrap();
     optimizer.backward_step(&loss)?;
-    println!(
-        "Check point time: {:?} at end backward_step",
-        std::time::Instant::now()
-    );
-    std::io::stdout().flush().unwrap();
+    // println!(
+    //     "Check point time: {:?} at end backward_step",
+    //     std::time::Instant::now()
+    // );
+    // std::io::stdout().flush().unwrap();
 
     Ok((
         site2xy_adjusted,
@@ -1390,6 +1628,7 @@ fn optimize_phase(
     room_connections: &[(usize, usize)],
     iter: usize,
     params: &ProjectParams,
+    mirror_canvas: Option<&mut del_canvas_core::canvas_gif::Canvas>,
 ) -> anyhow::Result<Vec<f32>> {
     let num_sites = if site2xy_start.is_empty() {
         0
@@ -1408,10 +1647,11 @@ fn optimize_phase(
         device,
     )?;
 
-    let diag_path = PathBuf::from("target/site_diagnostics.txt");
-    if let Some(parent) = diag_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let (num_rooms, _) = room2area_trg.dims2()?;
+    let diag_dir = PathBuf::from("target");
+    std::fs::create_dir_all(&diag_dir)?;
+    let diag_path = diag_dir.join("site_diagnostics.txt");
+    let boundary_diag_path = diag_dir.join("boundary_diagnostics.txt");
     let file_existed = diag_path.exists();
     {
         use std::fs::OpenOptions;
@@ -1424,7 +1664,7 @@ fn optimize_phase(
                 file,
                 "# Site diagnostics\n# sites={} rooms={} iterations={}\n",
                 site2room.len(),
-                room2area_trg.dims2()?.0,
+                num_rooms,
                 iter
             )?;
         } else {
@@ -1433,13 +1673,31 @@ fn optimize_phase(
                 file,
                 "# --- New phase: sites={} rooms={} iterations={} ---",
                 site2room.len(),
-                room2area_trg.dims2()?.0,
+                num_rooms,
                 iter
             )?;
         }
     }
 
     let learning_rates = &params.learning_rates;
+    let mut mirror_canvas = mirror_canvas;
+    let mut mirror_copy_enabled = true;
+    if let Some(extra_canvas) = mirror_canvas.as_deref() {
+        let same_dims =
+            extra_canvas.width == canvas_gif.width && extra_canvas.height == canvas_gif.height;
+        let same_buffer = extra_canvas.data.len() == canvas_gif.data.len();
+        if !same_dims || !same_buffer {
+            eprintln!(
+                "[floorplan] mirror canvas dimensions ({}x{}) do not match primary canvas ({}x{}); skipping phase export",
+                extra_canvas.width,
+                extra_canvas.height,
+                canvas_gif.width,
+                canvas_gif.height
+            );
+            mirror_copy_enabled = false;
+        }
+    }
+
     let mut optimizer = candle_nn::AdamW::new(
         vec![site2xy.clone()],
         candle_nn::ParamsAdamW {
@@ -1450,6 +1708,9 @@ fn optimize_phase(
 
     let phase_timer = Instant::now();
     let mut persent_last = 0;
+    if let Err(err) = record_boundary_diagnostics(&boundary_diag_path, vtxl2xy) {
+        eprintln!("[floorplan] failed to write boundary diagnostics: {err}");
+    }
     for iter_idx in 0..iter {
         let persent = ((iter_idx + 1) * 100) / iter;
         if persent != persent_last {
@@ -1501,12 +1762,11 @@ fn optimize_phase(
         }
         canvas_gif.clear(0);
 
-        println!(
-            "Check point time: {:?} at start my_paint",
-            std::time::Instant::now()
-        );
-        std::io::stdout().flush().unwrap();
-
+        // println!(
+        //     "Check point time: {:?} at start my_paint",
+        //     std::time::Instant::now()
+        // );
+        // std::io::stdout().flush().unwrap();
         crate::my_paint(
             canvas_gif,
             transform_world2pix,
@@ -1518,17 +1778,138 @@ fn optimize_phase(
             &edge2vtxv_wall,
         );
 
-        println!(
-            "Check point time: {:?} at end my_paint",
-            std::time::Instant::now()
-        );
-        std::io::stdout().flush().unwrap();
+        // println!(
+        //     "Check point time: {:?} at end my_paint",
+        //     std::time::Instant::now()
+        // );
+        // std::io::stdout().flush().unwrap();
+        if mirror_copy_enabled {
+            if let Some(extra_canvas) = mirror_canvas.as_deref_mut() {
+                // Mirror the drawn frame into the per-phase GIF without rerunning my_paint.
+                extra_canvas.data.copy_from_slice(&canvas_gif.data);
+                extra_canvas.write();
+            }
+        }
 
         canvas_gif.write();
     }
 
     println!("Phase elapsed: {:.2?}", phase_timer.elapsed());
     let final_coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
+
+    fn record_boundary_diagnostics(path: &Path, boundary: &[f32]) -> std::io::Result<()> {
+        use std::fs::OpenOptions;
+
+        fn polygon_area(vertices: &[(f32, f32)]) -> f32 {
+            if vertices.len() < 3 {
+                return 0.0;
+            }
+            let mut acc = 0.0f32;
+            for i in 0..vertices.len() {
+                let (x0, y0) = vertices[i];
+                let (x1, y1) = vertices[(i + 1) % vertices.len()];
+                acc += x0 * y1 - x1 * y0;
+            }
+            (acc * 0.5).abs()
+        }
+
+        fn polygon_perimeter(vertices: &[(f32, f32)]) -> f32 {
+            if vertices.len() < 2 {
+                return 0.0;
+            }
+            let mut acc = 0.0f32;
+            for pair in vertices.windows(2) {
+                let (x0, y0) = pair[0];
+                let (x1, y1) = pair[1];
+                let dx = x1 - x0;
+                let dy = y1 - y0;
+                acc += (dx * dx + dy * dy).sqrt();
+            }
+            if vertices.len() > 2 {
+                let (x0, y0) = vertices[0];
+                let (x1, y1) = *vertices.last().unwrap();
+                let dx = x0 - x1;
+                let dy = y0 - y1;
+                acc += (dx * dx + dy * dy).sqrt();
+            }
+            acc
+        }
+
+        let mut vertices = Vec::with_capacity(boundary.len() / 2);
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for chunk in boundary.chunks(2) {
+            if chunk.len() < 2 {
+                continue;
+            }
+            let x = chunk[0];
+            let y = chunk[1];
+            vertices.push((x, y));
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+        if vertices.is_empty() {
+            min_x = 0.0;
+            max_x = 0.0;
+            min_y = 0.0;
+            max_y = 0.0;
+        }
+        let span_x = (max_x - min_x).abs();
+        let span_y = (max_y - min_y).abs();
+        let diag = (span_x * span_x + span_y * span_y).sqrt();
+        let perimeter = polygon_perimeter(&vertices);
+        let area = polygon_area(&vertices);
+        let closed = if vertices.len() >= 3 {
+            let first = vertices.first().unwrap();
+            let last = vertices.last().unwrap();
+            (first.0 - last.0).abs() <= 1.0e-5 && (first.1 - last.1).abs() <= 1.0e-5
+        } else {
+            false
+        };
+        let geom_status = match vertices.len() {
+            0 => "empty",
+            1 => "point",
+            2 => "segment",
+            _ => "polygon",
+        };
+
+        let file_existed = path.exists();
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        if !file_existed {
+            writeln!(file, "# Boundary diagnostics")?;
+        }
+        writeln!(file)?;
+        writeln!(
+            file,
+            "boundary_vertices={} status={} closed={}",
+            vertices.len(),
+            geom_status,
+            closed
+        )?;
+        writeln!(
+            file,
+            "  bbox=({:.9},{:.9})-({:.9},{:.9}) span=({:.9},{:.9}) diag={:.9}",
+            min_x, min_y, max_x, max_y, span_x, span_y, diag
+        )?;
+        writeln!(file, "  perimeter={:.9} area={:.9}", perimeter, area)?;
+        if vertices.is_empty() {
+            writeln!(file, "  vertices=[]")?;
+        } else {
+            write!(file, "  vertices=[")?;
+            for (idx, (x, y)) in vertices.iter().enumerate() {
+                if idx > 0 {
+                    write!(file, ", ")?;
+                }
+                write!(file, "({:.9},{:.9})", x, y)?;
+            }
+            writeln!(file, "]")?;
+        }
+        Ok(())
+    }
 
     fn record_site_diagnostics(
         path: &Path,
@@ -1748,13 +2129,26 @@ fn optimize_impl(
 ) -> anyhow::Result<()> {
     let canvas_width = canvas_gif.width;
     let canvas_height = canvas_gif.height;
+    let site_positions_for_bounds: Vec<[f32; 2]> = site2xy
+        .chunks_exact(2)
+        .map(|chunk| [chunk[0], chunk[1]])
+        .collect();
+    let (min_x, max_x, min_y, max_y) = coordinate_bounds(&vtxl2xy, &site_positions_for_bounds);
+    let span_x = (max_x - min_x).abs().max(1.0e-6);
+    let span_y = (max_y - min_y).abs().max(1.0e-6);
+    let padding = 0.1f32;
+    let draw_fraction = 1.0 - 2.0 * padding;
+    let scale_x = canvas_width as f32 * draw_fraction / span_x;
+    let scale_y = -(canvas_height as f32) * draw_fraction / span_y;
+    let translate_x = canvas_width as f32 * padding - min_x * scale_x;
+    let translate_y = canvas_height as f32 * (1.0 - padding) - min_y * scale_y;
     let transform_world2pix = nalgebra::Matrix3::<f32>::new(
-        canvas_width as f32 * 0.8,
+        scale_x,
         0.,
-        canvas_width as f32 * 0.1,
+        translate_x,
         0.,
-        -(canvas_height as f32) * 0.8,
-        canvas_height as f32 * 0.9,
+        scale_y,
+        translate_y,
         0.,
         0.,
         1.,
@@ -1815,7 +2209,7 @@ fn optimize_impl(
             &palette,
         );
         site2xy = optimize_phase(
-            &mut phase_canvas,
+            canvas_gif,
             &transform_world2pix,
             &vtxl2xy,
             &site2xy,
@@ -1826,6 +2220,7 @@ fn optimize_impl(
             &room_connections,
             iter,
             params,
+            Some(&mut phase_canvas),
         )?;
     }
 
