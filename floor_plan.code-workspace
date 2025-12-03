@@ -2,6 +2,9 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "../floor_plan_org"
 		}
 	],
 	"settings": {}

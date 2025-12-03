@@ -375,8 +375,14 @@ impl PyOptimizeContext {
         mut stage: PyRefMut<'_, PyVoronoiStage>,
     ) -> PyResult<PyOptimizeResult> {
         let stage = stage.take_stage()?;
-        let (site2xy_adjusted, voronoi_info, vtxv2xy, edge2vtxv_wall, site_coords_sanitized) =
-            crate::optimize_iteration(
+        let (
+            site2xy_adjusted,
+            voronoi_info,
+            vtxv2xy,
+            edge2vtxv_wall,
+            site_coords_sanitized,
+            _loss_breakdown,
+        ) = crate::optimize_iteration(
                 &self.vtxl2xy,
                 &self.site2xy,
                 &self.site2xy_ini,

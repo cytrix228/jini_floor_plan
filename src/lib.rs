@@ -21,6 +21,14 @@ const MY_PAINT_SVG_COLORS: [&str; 8] = [
 ];
 
 static PROJECT_PARAMS: OnceLock<Vec<ProjectParams>> = OnceLock::new();
+static ITER_TEXT_SCALE: OnceLock<usize> = OnceLock::new();
+
+const ITER_TEXT_COLOR: u8 = 1;
+const ITER_TEXT_MARGIN: usize = 4;
+const FONT_HEIGHT: usize = 5;
+const FONT_SPACING: usize = 1;
+const ITER_TEXT_SCALE_ENV: &str = "FLOORPLAN_ITER_TEXT_SCALE";
+const ITER_TEXT_SCALE_DEFAULT: f32 = 4.0;
 
 #[derive(Debug, Deserialize, Clone)]
 struct ProjectParams {
@@ -124,6 +132,204 @@ impl Default for LearningRates {
             third: Self::default_third(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LossBreakdown {
+    pub each_area: f32,
+    pub total_area: f32,
+    pub wall_length: f32,
+    pub topology: f32,
+    pub fix: f32,
+    pub lloyd: f32,
+    pub total: f32,
+}
+
+#[derive(Clone, Copy)]
+struct Glyph {
+    width: usize,
+    rows: [u8; FONT_HEIGHT],
+}
+
+impl LossBreakdown {
+    fn from_tensors(
+        loss_each_area: &candle_core::Tensor,
+        loss_total_area: &candle_core::Tensor,
+        loss_walllen: &candle_core::Tensor,
+        loss_topo: &candle_core::Tensor,
+        loss_fix: &candle_core::Tensor,
+        loss_lloyd: &candle_core::Tensor,
+        loss_total: &candle_core::Tensor,
+    ) -> candle_core::Result<Self> {
+        Ok(Self {
+            each_area: loss_each_area.to_scalar::<f32>()?,
+            total_area: loss_total_area.to_scalar::<f32>()?,
+            wall_length: loss_walllen.to_scalar::<f32>()?,
+            topology: loss_topo.to_scalar::<f32>()?,
+            fix: loss_fix.to_scalar::<f32>()?,
+            lloyd: loss_lloyd.to_scalar::<f32>()?,
+            total: loss_total.to_scalar::<f32>()?,
+        })
+    }
+}
+
+fn glyph_for(ch: char) -> Option<Glyph> {
+    match ch {
+        '0' => Some(Glyph {
+            width: 3,
+            rows: [0b111, 0b101, 0b101, 0b101, 0b111],
+        }),
+        '1' => Some(Glyph {
+            width: 3,
+            rows: [0b010, 0b110, 0b010, 0b010, 0b111],
+        }),
+        '2' => Some(Glyph {
+            width: 3,
+            rows: [0b111, 0b001, 0b111, 0b100, 0b111],
+        }),
+        '3' => Some(Glyph {
+            width: 3,
+            rows: [0b111, 0b001, 0b111, 0b001, 0b111],
+        }),
+        '4' => Some(Glyph {
+            width: 3,
+            rows: [0b101, 0b101, 0b111, 0b001, 0b001],
+        }),
+        '5' => Some(Glyph {
+            width: 3,
+            rows: [0b111, 0b100, 0b111, 0b001, 0b111],
+        }),
+        '6' => Some(Glyph {
+            width: 3,
+            rows: [0b111, 0b100, 0b111, 0b101, 0b111],
+        }),
+        '7' => Some(Glyph {
+            width: 3,
+            rows: [0b111, 0b001, 0b010, 0b010, 0b010],
+        }),
+        '8' => Some(Glyph {
+            width: 3,
+            rows: [0b111, 0b101, 0b111, 0b101, 0b111],
+        }),
+        '9' => Some(Glyph {
+            width: 3,
+            rows: [0b111, 0b101, 0b111, 0b001, 0b111],
+        }),
+        '/' => Some(Glyph {
+            width: 3,
+            rows: [0b001, 0b001, 0b010, 0b010, 0b100],
+        }),
+        _ => None,
+    }
+}
+
+fn iteration_text_scale_multiplier() -> usize {
+    *ITER_TEXT_SCALE.get_or_init(|| {
+        let parsed = std::env::var(ITER_TEXT_SCALE_ENV)
+            .ok()
+            .and_then(|raw| raw.parse::<f32>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(ITER_TEXT_SCALE_DEFAULT);
+        let clamped = parsed.clamp(1.0, 64.0);
+        clamped.round().max(1.0) as usize
+    })
+}
+
+fn text_pixel_width(text: &str, scale: usize) -> usize {
+    let mut width = 0usize;
+    let mut first = true;
+    for ch in text.chars() {
+        if let Some(glyph) = glyph_for(ch) {
+            if !first {
+                width += FONT_SPACING * scale;
+            }
+            width += glyph.width * scale;
+            first = false;
+        }
+    }
+    width
+}
+
+fn draw_glyph(
+    canvas: &mut Canvas,
+    glyph: Glyph,
+    origin_x: usize,
+    origin_y: usize,
+    color: u8,
+    scale: usize,
+) {
+    if scale == 0 {
+        return;
+    }
+    for (row_idx, row_bits) in glyph.rows.iter().enumerate() {
+        for sy in 0..scale {
+            let y = origin_y + row_idx * scale + sy;
+            if y >= canvas.height {
+                break;
+            }
+            for col in 0..glyph.width {
+                let bit = 1 << (glyph.width - 1 - col);
+                if row_bits & bit == 0 {
+                    continue;
+                }
+                for sx in 0..scale {
+                    let x = origin_x + col * scale + sx;
+                    if x >= canvas.width {
+                        break;
+                    }
+                    canvas.data[y * canvas.width + x] = color;
+                }
+            }
+        }
+    }
+}
+
+fn draw_text(
+    canvas: &mut Canvas,
+    text: &str,
+    start_x: usize,
+    start_y: usize,
+    color: u8,
+    scale: usize,
+) {
+    let mut cursor = start_x;
+    let mut first = true;
+    for ch in text.chars() {
+        if let Some(glyph) = glyph_for(ch) {
+            if !first {
+                cursor += FONT_SPACING * scale;
+            }
+            draw_glyph(canvas, glyph, cursor, start_y, color, scale);
+            cursor += glyph.width * scale;
+            first = false;
+        }
+    }
+}
+
+fn overlay_iteration_counter(canvas: &mut Canvas, iter_idx: usize, total_iters: usize) {
+    if canvas.width == 0 || canvas.height == 0 {
+        return;
+    }
+    let scale = iteration_text_scale_multiplier();
+    let display_total = total_iters.max(1);
+    let text = format!("{:04}/{:04}", iter_idx + 1, display_total);
+    let text_width = text_pixel_width(&text, scale);
+    if text_width == 0 {
+        return;
+    }
+    let text_height = FONT_HEIGHT * scale;
+    if text_height >= canvas.height {
+        return;
+    }
+    let origin_x = canvas
+        .width
+        .saturating_sub(text_width + ITER_TEXT_MARGIN)
+        .min(canvas.width.saturating_sub(1));
+    let origin_y = canvas
+        .height
+        .saturating_sub(text_height + ITER_TEXT_MARGIN)
+        .min(canvas.height.saturating_sub(1));
+    draw_text(canvas, &text, origin_x, origin_y, ITER_TEXT_COLOR, scale);
 }
 
 fn load_project_params() -> anyhow::Result<Vec<ProjectParams>> {
@@ -1513,6 +1719,7 @@ pub(crate) fn optimize_iteration(
     candle_core::Tensor,
     Vec<usize>,
     Vec<f32>,
+    LossBreakdown,
 )> {
     let VoronoiStage {
         site2xy_adjusted,
@@ -1583,16 +1790,24 @@ pub(crate) fn optimize_iteration(
         + &loss_fix
         + &loss_lloyd)?;
 
-    // Check for NaN loss
-    let loss_scalar = loss.to_scalar::<f32>()?;
-    if !loss_scalar.is_finite() {
-        eprintln!("[floorplan] Loss is not finite: {}", loss_scalar);
-        eprintln!("loss_each_area: {}", loss_each_area.to_scalar::<f32>()?);
-        eprintln!("loss_total_area: {}", loss_total_area.to_scalar::<f32>()?);
-        eprintln!("loss_walllen: {}", loss_walllen.to_scalar::<f32>()?);
-        eprintln!("loss_topo: {}", loss_topo.to_scalar::<f32>()?);
-        eprintln!("loss_fix: {}", loss_fix.to_scalar::<f32>()?);
-        eprintln!("loss_lloyd: {}", loss_lloyd.to_scalar::<f32>()?);
+    let breakdown = LossBreakdown::from_tensors(
+        &loss_each_area,
+        &loss_total_area,
+        &loss_walllen,
+        &loss_topo,
+        &loss_fix,
+        &loss_lloyd,
+        &loss,
+    )?;
+
+    if !breakdown.total.is_finite() {
+        eprintln!("[floorplan] Loss is not finite: {}", breakdown.total);
+        eprintln!("loss_each_area: {}", breakdown.each_area);
+        eprintln!("loss_total_area: {}", breakdown.total_area);
+        eprintln!("loss_walllen: {}", breakdown.wall_length);
+        eprintln!("loss_topo: {}", breakdown.topology);
+        eprintln!("loss_fix: {}", breakdown.fix);
+        eprintln!("loss_lloyd: {}", breakdown.lloyd);
         return Err(anyhow::anyhow!("Loss is not finite"));
     }
 
@@ -1614,6 +1829,7 @@ pub(crate) fn optimize_iteration(
         vtxv2xy,
         edge2vtxv_wall,
         site_coords_sanitized,
+        breakdown,
     ))
 }
 fn optimize_phase(
@@ -1651,6 +1867,7 @@ fn optimize_phase(
     let diag_dir = PathBuf::from("target");
     std::fs::create_dir_all(&diag_dir)?;
     let diag_path = diag_dir.join("site_diagnostics.txt");
+    let loss_diag_path = diag_dir.join("loss_diagnostics.txt");
     let boundary_diag_path = diag_dir.join("boundary_diagnostics.txt");
     let file_existed = diag_path.exists();
     {
@@ -1666,6 +1883,31 @@ fn optimize_phase(
                 site2room.len(),
                 num_rooms,
                 iter
+            )?;
+        } else {
+            writeln!(file)?;
+            writeln!(
+                file,
+                "# --- New phase: sites={} rooms={} iterations={} ---",
+                site2room.len(),
+                num_rooms,
+                iter
+            )?;
+        }
+    }
+
+    let loss_file_existed = loss_diag_path.exists();
+    {
+        use std::fs::OpenOptions;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&loss_diag_path)?;
+        if !loss_file_existed {
+            writeln!(file, "# Loss diagnostics")?;
+            writeln!(
+                file,
+                "# columns: iteration loss_total loss_each_area loss_total_area loss_wall_length loss_topology loss_fix loss_lloyd"
             )?;
         } else {
             writeln!(file)?;
@@ -1734,8 +1976,14 @@ fn optimize_phase(
 
         let voronoi_stage = iterate_voronoi_stage(vtxl2xy, &site2xy, site2room)?;
 
-        let (_site2xy_adjusted, voronoi_info, vtxv2xy, edge2vtxv_wall, site_coords_sanitized) =
-            optimize_iteration(
+        let (
+            _site2xy_adjusted,
+            voronoi_info,
+            vtxv2xy,
+            edge2vtxv_wall,
+            site_coords_sanitized,
+            loss_breakdown,
+        ) = optimize_iteration(
                 vtxl2xy,
                 &site2xy,
                 site2xy_ini,
@@ -1760,6 +2008,9 @@ fn optimize_phase(
         ) {
             eprintln!("[floorplan] failed to write site diagnostics: {err}");
         }
+        if let Err(err) = record_loss_diagnostics(&loss_diag_path, iter_idx, &loss_breakdown) {
+            eprintln!("[floorplan] failed to write loss diagnostics: {err}");
+        }
         canvas_gif.clear(0);
 
         // println!(
@@ -1777,6 +2028,7 @@ fn optimize_phase(
             site2room,
             &edge2vtxv_wall,
         );
+        overlay_iteration_counter(canvas_gif, iter_idx, iter);
 
         // println!(
         //     "Check point time: {:?} at end my_paint",
@@ -1908,6 +2160,24 @@ fn optimize_phase(
             }
             writeln!(file, "]")?;
         }
+        Ok(())
+    }
+
+    fn record_loss_diagnostics(
+        path: &Path,
+        iteration: usize,
+        losses: &LossBreakdown,
+    ) -> std::io::Result<()> {
+        use std::fs::OpenOptions;
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(file, "iteration={iteration}")?;
+        writeln!(file, "  loss_total={:.9}", losses.total)?;
+        writeln!(file, "  loss_each_area={:.9}", losses.each_area)?;
+        writeln!(file, "  loss_total_area={:.9}", losses.total_area)?;
+        writeln!(file, "  loss_wall_length={:.9}", losses.wall_length)?;
+        writeln!(file, "  loss_topology={:.9}", losses.topology)?;
+        writeln!(file, "  loss_fix={:.9}", losses.fix)?;
+        writeln!(file, "  loss_lloyd={:.9}", losses.lloyd)?;
         Ok(())
     }
 
