@@ -2515,12 +2515,14 @@ fn optimize_impl(
             phase_offset,
             params_index + phase_offset
         );
-        let phase_filename = format!("result{phase:02}.gif", phase = phase_offset);
+        let phase_filename = format!("target/result{phase:02}.gif", phase = phase_offset);
         let mut phase_canvas = del_canvas_core::canvas_gif::Canvas::new(
             &phase_filename,
             (canvas_width, canvas_height),
             &palette,
         );
+
+        
         optimize_phase(
             canvas_gif,
             &transform_world2pix,
