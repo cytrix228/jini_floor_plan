@@ -45,6 +45,7 @@ class LossWeights:
 	each_area: float = 5.0
 	total_area: float = 10.0
 	wall_length: float = 1.0
+	wall_angle: float = 1.0
 	topology: float = 10.0
 	fix: float = 100.0
 	lloyd: float = 0.1
@@ -141,6 +142,7 @@ def load_params(path: Optional[Path] = None) -> OptimizeParams:
 		each_area=float(loss_cfg.get("each_area", default_loss.each_area)),
 		total_area=float(loss_cfg.get("total_area", default_loss.total_area)),
 		wall_length=float(loss_cfg.get("wall_length", default_loss.wall_length)),
+		wall_angle=float(loss_cfg.get("wall_angle", default_loss.wall_angle)),
 		topology=float(loss_cfg.get("topology", default_loss.topology)),
 		fix=float(loss_cfg.get("fix", default_loss.fix)),
 		lloyd=float(loss_cfg.get("lloyd", default_loss.lloyd)),
@@ -308,8 +310,9 @@ def optimize(
 		print(
 			f"iter={iter_idx:04d} loss={total_loss:.6f} "
 			f"areas={metrics['each_area']:.6f} total={metrics['total_area']:.6f} "
-			f"wall={metrics['wall_length']:.6f} topo={metrics['topology']:.6f} "
-			f"fix={metrics['fix']:.6f} lloyd={metrics['lloyd']:.6f}"
+			f"wall={metrics['wall_length']:.6f} angle={metrics['wall_angle']:.6f} "
+			f"topo={metrics['topology']:.6f} fix={metrics['fix']:.6f} "
+			f"lloyd={metrics['lloyd']:.6f}"
 		)
 
 		if need_render and canvas is not None:
@@ -346,6 +349,7 @@ def _evaluate_loss(
 	loss_total_area = abs(sum_area - ctx.total_area_target)
 	edge2vtxv_wall = fp.edge2vtvx_wall(voronoi, ctx.site2room)
 	loss_walllen = _wall_length(edge2vtxv_wall, vtxv2xy)
+	loss_wallangle = _wall_angle(edge2vtxv_wall, vtxv2xy)
 	loss_topo = fp.loss_topo_unidirectional(
 		adjusted,
 		ctx.num_sites,
@@ -368,6 +372,7 @@ def _evaluate_loss(
 		"each_area": loss_each_area,
 		"total_area": loss_total_area,
 		"wall_length": loss_walllen,
+		"wall_angle": loss_wallangle,
 		"topology": loss_topo,
 		"fix": loss_fix,
 		"lloyd": loss_lloyd,
@@ -377,6 +382,7 @@ def _evaluate_loss(
 		metrics["each_area"] * weights.each_area
 		+ metrics["total_area"] * weights.total_area
 		+ metrics["wall_length"] * weights.wall_length
+		+ metrics["wall_angle"] * weights.wall_angle
 		+ metrics["topology"] * weights.topology
 		+ metrics["fix"] * weights.fix
 		+ metrics["lloyd"] * weights.lloyd
@@ -579,6 +585,24 @@ def _wall_length(edge2vtxv: Sequence[int], vtxv2xy: Sequence[float]) -> float:
 		x0, y0 = vtxv2xy[i0], vtxv2xy[i0 + 1]
 		x1, y1 = vtxv2xy[i1], vtxv2xy[i1 + 1]
 		total += math.hypot(x1 - x0, y1 - y0)
+	return total
+
+
+def _wall_angle(edge2vtxv: Sequence[int], vtxv2xy: Sequence[float]) -> float:
+	"""Return sum |sin(4θ)| so axis/diagonal edges score 0 and mid angles approach 1."""
+	total = 0.0
+	eps = 1.0e-12
+	for idx in range(0, len(edge2vtxv), 2):
+		i0 = edge2vtxv[idx] * 2
+		i1 = edge2vtxv[idx + 1] * 2
+		dx = vtxv2xy[i1] - vtxv2xy[i0]
+		dy = vtxv2xy[i1 + 1] - vtxv2xy[i0 + 1]
+		len_sq = dx * dx + dy * dy
+		if len_sq <= eps:
+			continue
+		numer = 4.0 * dx * dy * (dx * dx - dy * dy)
+		denom = (len_sq + eps) ** 2
+		total += abs(numer) / denom
 	return total
 
 

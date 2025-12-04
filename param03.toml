@@ -2,6 +2,7 @@
 each_area = 1.0
 total_area = 2.0
 wall_length = 2
+wall_angle = 2
 topology = 1.0
 fix = 1.0
 lloyd = 0.00000005

@@ -55,6 +55,8 @@ struct LossWeights {
     total_area: f32,
     #[serde(default = "LossWeights::default_wall_length")]
     wall_length: f32,
+    #[serde(default = "LossWeights::default_wall_angle")]
+    wall_angle: f32,
     #[serde(default = "LossWeights::default_topology")]
     topology: f32,
     #[serde(default = "LossWeights::default_fix")]
@@ -65,6 +67,10 @@ struct LossWeights {
 
 impl LossWeights {
     const fn default_wall_length() -> f32 {
+        1.0
+    }
+
+    const fn default_wall_angle() -> f32 {
         1.0
     }
 
@@ -95,6 +101,7 @@ impl Default for LossWeights {
             each_area: Self::default_each_area(),
             total_area: Self::default_total_area(),
             wall_length: Self::default_wall_length(),
+            wall_angle: Self::default_wall_angle(),
             topology: Self::default_topology(),
             fix: Self::default_fix(),
             lloyd: Self::default_lloyd(),
@@ -149,6 +156,7 @@ pub struct LossBreakdown {
     pub each_area: f32,
     pub total_area: f32,
     pub wall_length: f32,
+    pub wall_angle: f32,
     pub topology: f32,
     pub fix: f32,
     pub lloyd: f32,
@@ -166,6 +174,7 @@ impl LossBreakdown {
         loss_each_area: &candle_core::Tensor,
         loss_total_area: &candle_core::Tensor,
         loss_walllen: &candle_core::Tensor,
+        loss_wallangle: &candle_core::Tensor,
         loss_topo: &candle_core::Tensor,
         loss_fix: &candle_core::Tensor,
         loss_lloyd: &candle_core::Tensor,
@@ -175,6 +184,7 @@ impl LossBreakdown {
             each_area: loss_each_area.to_scalar::<f32>()?,
             total_area: loss_total_area.to_scalar::<f32>()?,
             wall_length: loss_walllen.to_scalar::<f32>()?,
+            wall_angle: loss_wallangle.to_scalar::<f32>()?,
             topology: loss_topo.to_scalar::<f32>()?,
             fix: loss_fix.to_scalar::<f32>()?,
             lloyd: loss_lloyd.to_scalar::<f32>()?,
@@ -1788,12 +1798,27 @@ pub(crate) fn optimize_iteration(
         let loss_total_area = (room2area.sum_all()? - total_area_trg)?.abs()?;
         (loss_each_area, loss_total_area)
     };
-    let loss_walllen = {
+    // Use |sin(4θ)| so edges aligned to 0°, 45°, or 90° contribute zero and mid-angles approach 1.
+    let (loss_walllen, loss_wallangle) = {
         let vtx2xyz_to_edgevector = del_candle::vtx2xyz_to_edgevector::Layer {
             edge2vtx: Vec::<usize>::from(edge2vtxv_wall.clone()),
         };
         let edge2xy = vtxv2xy.apply_op1(vtx2xyz_to_edgevector)?;
-        edge2xy.abs()?.sum_all()?
+        let edge_abs = edge2xy.abs()?;
+        let loss_length = edge_abs.sum_all()?;
+
+        let dx = edge2xy.get_on_dim(1, 0)?;
+        let dy = edge2xy.get_on_dim(1, 1)?;
+        let dx2 = dx.sqr()?;
+        let dy2 = dy.sqr()?;
+        let len_sq = (&dx2 + &dy2)?;
+        let len_sq_safe = len_sq.affine(1.0, 1.0e-12)?;
+        let len_pow4 = len_sq_safe.sqr()?;
+        let mixed = dx.mul(&dy)?;
+        let diff = dx2.sub(&dy2)?;
+        let numer = mixed.mul(&diff)?.affine(4.0, 0.0)?;
+        let loss_angle = numer.div(&len_pow4)?.abs()?.sum_all()?;
+        (loss_length, loss_angle)
     };
     let loss_topo = crate::loss_topo::unidirectional(
         &site2xy_adjusted,
@@ -1820,12 +1845,14 @@ pub(crate) fn optimize_iteration(
         .affine(loss_weights.total_area as f64, 0.0)?
         .clone();
     let loss_walllen = loss_walllen.affine(loss_weights.wall_length as f64, 0.0)?;
+    let loss_wallangle = loss_wallangle.affine(loss_weights.wall_angle as f64, 0.0)?;
     let loss_topo = loss_topo.affine(loss_weights.topology as f64, 0.0)?;
     let loss_fix = loss_fix.affine(loss_weights.fix as f64, 0.0)?;
     let loss_lloyd = loss_lloyd.affine(loss_weights.lloyd as f64, 0.0)?;
     let loss = (&loss_each_area
         + &loss_total_area
         + &loss_walllen
+        + &loss_wallangle
         + &loss_topo
         + &loss_fix
         + &loss_lloyd)?;
@@ -1834,6 +1861,7 @@ pub(crate) fn optimize_iteration(
         &loss_each_area,
         &loss_total_area,
         &loss_walllen,
+        &loss_wallangle,
         &loss_topo,
         &loss_fix,
         &loss_lloyd,
@@ -1845,6 +1873,7 @@ pub(crate) fn optimize_iteration(
         eprintln!("loss_each_area: {}", breakdown.each_area);
         eprintln!("loss_total_area: {}", breakdown.total_area);
         eprintln!("loss_walllen: {}", breakdown.wall_length);
+        eprintln!("loss_wallangle: {}", breakdown.wall_angle);
         eprintln!("loss_topo: {}", breakdown.topology);
         eprintln!("loss_fix: {}", breakdown.fix);
         eprintln!("loss_lloyd: {}", breakdown.lloyd);
@@ -1933,7 +1962,7 @@ fn optimize_phase(
             writeln!(file, "# Loss diagnostics")?;
             writeln!(
                 file,
-                "# columns: iteration loss_total loss_each_area loss_total_area loss_wall_length loss_topology loss_fix loss_lloyd"
+                "# columns: iteration loss_total loss_each_area loss_total_area loss_wall_length loss_wall_angle loss_topology loss_fix loss_lloyd"
             )?;
         } else {
             writeln!(file)?;
@@ -2195,6 +2224,7 @@ fn optimize_phase(
         writeln!(file, "  loss_each_area={:.9}", losses.each_area)?;
         writeln!(file, "  loss_total_area={:.9}", losses.total_area)?;
         writeln!(file, "  loss_wall_length={:.9}", losses.wall_length)?;
+        writeln!(file, "  loss_wall_angle={:.9}", losses.wall_angle)?;
         writeln!(file, "  loss_topology={:.9}", losses.topology)?;
         writeln!(file, "  loss_fix={:.9}", losses.fix)?;
         writeln!(file, "  loss_lloyd={:.9}", losses.lloyd)?;

@@ -2,6 +2,7 @@
 each_area = 0
 total_area = 0
 wall_length = 0
+wall_angle = 0
 topology = 1
 fix = 1
 lloyd = 10
