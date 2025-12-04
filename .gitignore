@@ -4,6 +4,9 @@ target
 .venv_win
 .venv311
 .python311
-
-./*.gif
-./*.svg
+*.gif
+result*.gif
+result00.gif
+result01.gif
+result02.gif
+*.svg
