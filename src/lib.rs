@@ -122,6 +122,16 @@ impl LearningRates {
     const fn default_third() -> f32 {
         0.001
     }
+
+    fn value_for_step(&self, step: usize) -> f32 {
+        if step >= 300 {
+            self.third
+        } else if step >= 150 {
+            self.second
+        } else {
+            self.first
+        }
+    }
 }
 
 impl Default for LearningRates {
@@ -1836,33 +1846,19 @@ fn optimize_phase(
     canvas_gif: &mut del_canvas_core::canvas_gif::Canvas,
     transform_world2pix: &nalgebra::Matrix3<f32>,
     vtxl2xy: &[f32],
-    site2xy_start: &[f32],
+    site2xy: &candle_core::Var,
     site2xy_ini: &candle_core::Tensor,
-    site2xy2flag: &[f32],
+    site2xy2flag: &candle_core::Var,
     site2room: &[usize],
     room2area_trg: &candle_core::Tensor,
     room_connections: &[(usize, usize)],
     iter: usize,
     params: &ProjectParams,
     mirror_canvas: Option<&mut del_canvas_core::canvas_gif::Canvas>,
-) -> anyhow::Result<Vec<f32>> {
-    let num_sites = if site2xy_start.is_empty() {
-        0
-    } else {
-        site2xy_start.len() / 2
-    };
-    let device = &candle_core::Device::Cpu;
-    let site2xy = candle_core::Var::from_slice(
-        site2xy_start,
-        candle_core::Shape::from((num_sites, 2)),
-        device,
-    )?;
-    let site2xy2flag = candle_core::Var::from_slice(
-        site2xy2flag,
-        candle_core::Shape::from((num_sites, 2)),
-        device,
-    )?;
-
+    optimizer: &mut candle_nn::AdamW,
+    lr_state: &mut Option<f32>,
+    global_iter: &mut usize,
+) -> anyhow::Result<()> {
     let (num_rooms, _) = room2area_trg.dims2()?;
     let diag_dir = PathBuf::from("target");
     std::fs::create_dir_all(&diag_dir)?;
@@ -1940,14 +1936,6 @@ fn optimize_phase(
         }
     }
 
-    let mut optimizer = candle_nn::AdamW::new(
-        vec![site2xy.clone()],
-        candle_nn::ParamsAdamW {
-            lr: learning_rates.first as f64,
-            ..Default::default()
-        },
-    )?;
-
     let phase_timer = Instant::now();
     let mut persent_last = 0;
     if let Err(err) = record_boundary_diagnostics(&boundary_diag_path, vtxl2xy) {
@@ -1962,16 +1950,18 @@ fn optimize_phase(
             stdout.flush()?;
         }
 
-        if iter_idx == 150 {
+        let absolute_iter = *global_iter;
+        let desired_lr = learning_rates.value_for_step(absolute_iter);
+        let update_lr = match lr_state {
+            Some(current) => (*current - desired_lr).abs() > f32::EPSILON,
+            None => true,
+        };
+        if update_lr {
             optimizer.set_params(candle_nn::ParamsAdamW {
-                lr: learning_rates.second as f64,
+                lr: desired_lr as f64,
                 ..Default::default()
             });
-        } else if iter_idx == 300 {
-            optimizer.set_params(candle_nn::ParamsAdamW {
-                lr: learning_rates.third as f64,
-                ..Default::default()
-            });
+            *lr_state = Some(desired_lr);
         }
 
         let voronoi_stage = iterate_voronoi_stage(vtxl2xy, &site2xy, site2room)?;
@@ -1991,7 +1981,7 @@ fn optimize_phase(
                 site2room,
                 room2area_trg,
                 room_connections,
-                &mut optimizer,
+            optimizer,
                 params,
                 voronoi_stage,
             )?;
@@ -2044,10 +2034,10 @@ fn optimize_phase(
         }
 
         canvas_gif.write();
+        *global_iter += 1;
     }
 
     println!("Phase elapsed: {:.2?}", phase_timer.elapsed());
-    let final_coords = site2xy.flatten_all()?.to_vec1::<f32>()?;
 
     fn record_boundary_diagnostics(path: &Path, boundary: &[f32]) -> std::io::Result<()> {
         use std::fs::OpenOptions;
@@ -2382,13 +2372,13 @@ fn optimize_phase(
         }
         Ok(())
     }
-    Ok(final_coords)
+    Ok(())
 }
 
 fn optimize_impl(
     canvas_gif: &mut del_canvas_core::canvas_gif::Canvas,
     vtxl2xy: Vec<f32>,
-    mut site2xy: Vec<f32>,
+    site2xy: Vec<f32>,
     site2room: Vec<usize>,
     site2xy2flag: Vec<f32>,
     room2area_trg: Vec<f32>,
@@ -2443,17 +2433,30 @@ fn optimize_impl(
         );
     }
 
+    let device = &candle_core::Device::Cpu;
+    let num_sites = site2xy.len() / 2;
+    let site2xy_var = candle_core::Var::from_slice(
+        &site2xy,
+        candle_core::Shape::from((num_sites, 2)),
+        device,
+    )?;
+    let site2xy2flag_var = candle_core::Var::from_slice(
+        &site2xy2flag,
+        candle_core::Shape::from((num_sites, 2)),
+        device,
+    )?;
+
     let num_rooms = room2area_trg.len();
     let room2area_trg = candle_core::Tensor::from_vec(
         room2area_trg,
         candle_core::Shape::from((num_rooms, 1)),
-        &candle_core::Device::Cpu,
+        device,
     )?;
 
     let site2xy_ini = candle_core::Tensor::from_vec(
         site2xy.clone(),
         candle_core::Shape::from((site2xy.len() / 2, 2)),
-        &candle_core::Device::Cpu,
+        device,
     )?;
 
     let params_all = project_params_all();
@@ -2464,6 +2467,16 @@ fn optimize_impl(
             params_all.len()
         );
     }
+
+    let mut optimizer = candle_nn::AdamW::new(
+        vec![site2xy_var.clone()],
+        candle_nn::ParamsAdamW {
+            lr: params_all[params_index].learning_rates.first as f64,
+            ..Default::default()
+        },
+    )?;
+    let mut lr_state: Option<f32> = None;
+    let mut global_iter = 0usize;
 
     let total_timer = Instant::now();
     for (phase_offset, params) in params_all[params_index..].iter().enumerate() {
@@ -2478,19 +2491,22 @@ fn optimize_impl(
             (canvas_width, canvas_height),
             &palette,
         );
-        site2xy = optimize_phase(
+        optimize_phase(
             canvas_gif,
             &transform_world2pix,
             &vtxl2xy,
-            &site2xy,
+            &site2xy_var,
             &site2xy_ini,
-            &site2xy2flag,
+            &site2xy2flag_var,
             &site2room,
             &room2area_trg,
             &room_connections,
             iter,
             params,
             Some(&mut phase_canvas),
+            &mut optimizer,
+            &mut lr_state,
+            &mut global_iter,
         )?;
     }
 
