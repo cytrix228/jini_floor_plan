@@ -1804,27 +1804,22 @@ pub(crate) fn optimize_iteration(
             edge2vtx: Vec::<usize>::from(edge2vtxv_wall.clone()),
         };
         let edge2xy = vtxv2xy.apply_op1(vtx2xyz_to_edgevector)?;
-        let edge_abs = edge2xy.abs()?;
-        //let loss_length = edge_abs.sum_all()?;
-        // length of edges
-        let loss_length = edge_abs.sqr()?.sum_all()?;
 
-        let abs_edge = edge2xy.abs()?;
-        let dx = abs_edge.get_on_dim(1, 0)?;
-        let dy = abs_edge.get_on_dim(1, 1)?;
-        let sum = (&dx + &dy)?;
-        let diff = dx.sub(&dy)?.abs()?;
-        let max_comp = sum.add(&diff)?.affine(0.5, 0.0)?;
-        let min_comp = sum.sub(&diff)?.affine(0.5, 0.0)?;
-        let denom = max_comp.affine(1.0, 1.0e-12)?;
-        let ratio = min_comp.div(&denom)?;
-        // Approximate atan(ratio)/(pi/4) to keep the loss linear in the geometric angle
-        // ratio = tan(theta) for theta <= 45deg, cot(theta) otherwise.
-        let one_minus_ratio = ratio.affine(-1.0, 1.0)?;
-        let correction = one_minus_ratio.affine(0.273, 0.0)?;
-        let bracket = correction.affine(1.0, std::f64::consts::FRAC_PI_4)?;
-        let atan_norm = ratio.mul(&bracket)?.affine(4.0 / std::f64::consts::PI, 0.0)?;
-        let loss_angle = atan_norm.sum_all()?;
+        let dx = edge2xy.get_on_dim(1, 0)?;
+        let dy = edge2xy.get_on_dim(1, 1)?;
+        let dx2 = dx.sqr()?;
+        let dy2 = dy.sqr()?;
+        let len_sq = (&dx2 + &dy2)?;
+        let len_sq_safe = len_sq.affine(1.0, 1.0e-12)?;
+        let edge_len = len_sq_safe.sqrt()?;
+
+        let diff = dx2.sub(&dy2)?;
+        let abs_ratio = diff.div(&len_sq_safe)?.abs()?.clamp(0.0, 1.0)?;
+        let angle_penalty = abs_ratio.affine(-1.0, 1.0)?.sqrt()?;
+
+        let length_weighted_angle = edge_len.mul(&angle_penalty)?;
+        let loss_length = length_weighted_angle.sum_all()?;
+        let loss_angle = length_weighted_angle.mul(&angle_penalty)?.sum_all()?;
         (loss_length, loss_angle)
     };
     let loss_topo = crate::loss_topo::unidirectional(
