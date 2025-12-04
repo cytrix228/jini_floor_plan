@@ -210,6 +210,139 @@ fn bounding_box(poly: &[Point]) -> (f64, f64, f64, f64) {
     (min_x, max_x, min_y, max_y)
 }
 
+fn polygon_centroid(poly: &[Point]) -> Point {
+    if poly.is_empty() {
+        return Point::new(0.0, 0.0);
+    }
+    let mut signed_area = 0.0;
+    let mut centroid_x = 0.0;
+    let mut centroid_y = 0.0;
+    for i in 0..poly.len() {
+        let p0 = poly[i];
+        let p1 = poly[(i + 1) % poly.len()];
+        let cross = p0.x * p1.y - p1.x * p0.y;
+        signed_area += cross;
+        centroid_x += (p0.x + p1.x) * cross;
+        centroid_y += (p0.y + p1.y) * cross;
+    }
+    if signed_area.abs() < 1e-9 {
+        let count = poly.len() as f64;
+        let avg_x = poly.iter().map(|p| p.x).sum::<f64>() / count;
+        let avg_y = poly.iter().map(|p| p.y).sum::<f64>() / count;
+        return Point::new(avg_x, avg_y);
+    }
+    signed_area *= 0.5;
+    centroid_x /= 6.0 * signed_area;
+    centroid_y /= 6.0 * signed_area;
+    Point::new(centroid_x, centroid_y)
+}
+
+fn closest_point_on_segment(p: &Point, a: &Point, b: &Point) -> Point {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let denom = abx * abx + aby * aby;
+    if denom <= 1e-12 {
+        return *a;
+    }
+    let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / denom;
+    let clamped = t.clamp(0.0, 1.0);
+    Point::new(a.x + clamped * abx, a.y + clamped * aby)
+}
+
+fn closest_point_on_polygon(p: &Point, polygon: &[Point]) -> Option<Point> {
+    if polygon.is_empty() {
+        return None;
+    }
+    let mut closest = None;
+    let mut best_dist = f64::INFINITY;
+    for i in 0..polygon.len() {
+        let a = polygon[i];
+        let b = polygon[(i + 1) % polygon.len()];
+        let candidate = closest_point_on_segment(p, &a, &b);
+        let dist_sq = candidate.distance_sq(p);
+        if dist_sq < best_dist {
+            best_dist = dist_sq;
+            closest = Some(candidate);
+        }
+    }
+    closest
+}
+
+pub(crate) fn push_sites_inside_polygon(points: &mut [Point], boundary: &[Point]) -> usize {
+    if points.is_empty() || boundary.len() < 3 {
+        return 0;
+    }
+
+    let (min_x, max_x, min_y, max_y) = bounding_box(boundary);
+    let diag = ((max_x - min_x).powi(2) + (max_y - min_y).powi(2)).sqrt();
+    let push_distance = (diag * 1e-4).max(1e-6);
+    let centroid = polygon_centroid(boundary);
+
+    let mut pushed = 0usize;
+    for site in points.iter_mut() {
+        if point_in_polygon(site, boundary) {
+            continue;
+        }
+
+        let mut moved = false;
+        if let Some(boundary_point) = closest_point_on_polygon(site, boundary) {
+            let mut dir_x = boundary_point.x - site.x;
+            let mut dir_y = boundary_point.y - site.y;
+            let len_sq = dir_x * dir_x + dir_y * dir_y;
+            if len_sq > 1e-18 {
+                let len = len_sq.sqrt();
+                dir_x /= len;
+                dir_y /= len;
+
+                let mut step = push_distance;
+                for _ in 0..6 {
+                    let candidate = Point::new(
+                        boundary_point.x + dir_x * step,
+                        boundary_point.y + dir_y * step,
+                    );
+                    if point_in_polygon(&candidate, boundary) {
+                        *site = candidate;
+                        moved = true;
+                        break;
+                    }
+                    step *= 1.5;
+                }
+            }
+        }
+
+        if !moved {
+            let mut dir_x = centroid.x - site.x;
+            let mut dir_y = centroid.y - site.y;
+            let len_sq = dir_x * dir_x + dir_y * dir_y;
+            if len_sq > 1e-18 {
+                let len = len_sq.sqrt();
+                dir_x /= len;
+                dir_y /= len;
+                let candidate = Point::new(
+                    site.x + dir_x * push_distance,
+                    site.y + dir_y * push_distance,
+                );
+                if point_in_polygon(&candidate, boundary) {
+                    *site = candidate;
+                    moved = true;
+                } else {
+                    *site = centroid;
+                    moved = true;
+                }
+            } else {
+                *site = centroid;
+                moved = true;
+            }
+        }
+
+        if moved {
+            pushed += 1;
+        }
+    }
+
+    pushed
+}
+
 /// Represents an edge between two points.
 /// Used for identifying the boundary of the cavity in Bowyer-Watson.
 #[derive(Clone, Copy, Debug)]
@@ -697,9 +830,9 @@ pub fn compute_voronoi_fracture(
         }
 
         let mut clipped_poly = sutherland_hodgman(&raw_poly, width, height);
-        if let Some(boundary_poly) = boundary {
-            clipped_poly = clip_polygon_with_boundary(&clipped_poly, boundary_poly);
-        }
+        // if let Some(boundary_poly) = boundary {
+        //     clipped_poly = clip_polygon_with_boundary(&clipped_poly, boundary_poly);
+        // }
         if clipped_poly.len() < 3 || polygon_area_abs(&clipped_poly) < min_cell_area {
             continue;
         }
@@ -719,6 +852,173 @@ pub fn compute_voronoi_fracture(
 
     (cells, sites)
 }
+
+
+
+/// Computes the perpendicular bisector line (in coefficients A, B, C of Ax + By = C) 
+/// between two site points such that `A*x + B*y <= C` is the half-plane of points closer to `p1` than `p2`.
+fn bisector_line(p1: &Point, p2: &Point) -> (f64, f64, f64) {
+    // Vector from p1 to p2
+    let dx = p2.x - p1.x;
+    let dy = p2.y - p1.y;
+    // Line equation: dx * x + dy * y = C, passing through the midpoint of p1 and p2
+    // Compute C using midpoint: C = dx*mx + dy*my, where (mx,my) is midpoint
+    let mx = (p1.x + p2.x) * 0.5;
+    let my = (p1.y + p2.y) * 0.5;
+    let c = dx * mx + dy * my;
+    // Return (A, B, C)
+    (dx, dy, c)
+}
+
+/// Computes the intersection point of the line (A x + B y = C) with the line segment p1->p2, if it exists.
+/// Returns None if the segment is parallel to the line (no intersection or coincident).
+fn intersect_segment_line(p1: &Point, p2: &Point, a: f64, b: f64, c: f64) -> Option<Point> {
+    // Calculate the line-normal dot products for the segment endpoints
+    let p1_val: f64 = a * p1.x + b * p1.y;
+    //let p2_val = a * p2.x + b * p2.y;
+    // Denominator for line intersection parameter t
+    let denom = a * (p2.x - p1.x) + b * (p2.y - p1.y);
+    if denom.abs() < 1e-12 {
+        // The segment is nearly parallel to the line (denom == 0). No distinct intersection.
+        return None;
+    }
+    // Solve for t where p1 + t*(p2 - p1) intersects the line: a*x + b*y = c
+    let t = (c - p1_val) / denom;
+    if t < 0.0 || t > 1.0 {
+        // Intersection point is not within the segment bounds
+        return None;
+    }
+    Some(Point {
+        x: p1.x + t * (p2.x - p1.x),
+        y: p1.y + t * (p2.y - p1.y),
+    })
+}
+
+/// Clips the polygon (list of points) against the half-plane defined by `a*x + b*y <= c`.
+/// Returns the vertices of the polygon after clipping (could be empty if fully outside).
+fn clip_polygon_to_halfplane(polygon: &[Point], a: f64, b: f64, c: f64) -> Vec<Point> {
+    let mut result: Vec<Point> = Vec::new();
+    if polygon.is_empty() {
+        return result;
+    }
+    // Iterate over each edge (from vertex i to i+1)
+    for i in 0..polygon.len() {
+        let p1 = polygon[i];
+        let p2 = polygon[(i + 1) % polygon.len()];
+        let inside1 = a * p1.x + b * p1.y <= c;
+        let inside2 = a * p2.x + b * p2.y <= c;
+        // Case 1: p2 is inside (or on boundary) -> keep p2 (will add at the iteration when it becomes p1)
+        if inside1 {
+            // If the start point is inside, carry it over
+            result.push(p1);
+        }
+        // Case 2: Edge crosses the line -> add intersection point
+        if inside1 ^ inside2 {
+            if let Some(intersect) = intersect_segment_line(&p1, &p2, a, b, c) {
+                result.push(intersect);
+            }
+        }
+        // (If both outside, we add nothing; if both inside, we already added p1 and will add p2 in the next iteration)
+    }
+    result
+}
+
+/// Main function to compute Voronoi fracture of a polygon boundary given site points.
+/// Returns a tuple (cells, sites), where `cells` is a list of VoronoiCell and `sites` is a clone of input points.
+pub fn compute_voronoi_fracture2(
+    mut points: Vec<Point>,
+    boundary: Option<&[Point]>,
+    rng: &mut Rng,
+) -> (Vec<VoronoiCell>, Vec<Point>) {
+    if points.len() < 3 {
+        return (Vec::new(), points);
+    }
+
+    let mut base_polygon = match boundary {
+        Some(poly) if poly.len() >= 3 => sanitize_polygon_ring(poly),
+        _ => {
+            let (min_x, max_x, min_y, max_y) = bounding_box(&points);
+            let span_x = (max_x - min_x).abs().max(1.0);
+            let span_y = (max_y - min_y).abs().max(1.0);
+            let pad_x = span_x * 0.1;
+            let pad_y = span_y * 0.1;
+            vec![
+                Point::new(min_x - pad_x, min_y - pad_y),
+                Point::new(max_x + pad_x, min_y - pad_y),
+                Point::new(max_x + pad_x, max_y + pad_y),
+                Point::new(min_x - pad_x, max_y + pad_y),
+            ]
+        }
+    };
+    ensure_ccw(&mut base_polygon);
+    if base_polygon.len() < 3 {
+        return (Vec::new(), points);
+    }
+
+    push_sites_inside_polygon(&mut points, &base_polygon);
+
+    let mut min_cell_area = polygon_area_abs(&base_polygon) * 1.0e-6;
+    if !min_cell_area.is_finite() || min_cell_area <= 0.0 {
+        min_cell_area = 1.0e-9;
+    }
+
+    let mut cells: Vec<VoronoiCell> = Vec::new();
+    for (i, site) in points.iter().enumerate() {
+        let mut cell_polygon = base_polygon.clone();
+        for (j, other_site) in points.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let (a, b, c) = bisector_line(site, other_site);
+            cell_polygon = clip_polygon_to_halfplane(&cell_polygon, a, b, c);
+            if cell_polygon.is_empty() {
+                break;
+            }
+        }
+
+        if cell_polygon.len() < 3 {
+            continue;
+        }
+
+        cell_polygon = sanitize_polygon_ring(&cell_polygon);
+        if cell_polygon.len() < 3 {
+            continue;
+        }
+
+        // Guard against numerical drift that can push edges across concave dents.
+        cell_polygon = clip_polygon_with_boundary(&cell_polygon, &base_polygon);
+        if cell_polygon.len() < 3 {
+            continue;
+        }
+
+        cell_polygon = sanitize_polygon_ring(&cell_polygon);
+        if cell_polygon.len() < 3 {
+            continue;
+        }
+
+        ensure_ccw(&mut cell_polygon);
+        if polygon_area_abs(&cell_polygon) < min_cell_area {
+            continue;
+        }
+
+        let rand_val = rng.next_u64();
+        let r = (rand_val & 0xFF) as u8;
+        let g = ((rand_val >> 8) & 0xFF) as u8;
+        let b_val = ((rand_val >> 16) & 0xFF) as u8;
+        let color_str = format!("#{:02X}{:02X}{:02X}", r, g, b_val);
+
+        cells.push(VoronoiCell {
+            site_index: i,
+            site: *site,
+            vertices: cell_polygon,
+            color: color_str,
+        });
+    }
+
+    (cells, points)
+}
+
+
 
 fn write_voronoi_svg(
     output: &str,

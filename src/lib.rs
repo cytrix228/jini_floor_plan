@@ -1450,6 +1450,19 @@ fn build_voronoi_geometry(
         .filter(|chunk| chunk.len() == 2)
         .map(|c| [c[0], c[1]])
         .collect();
+    let boundary_polygon_world: Option<Vec<crate::fracture::Point>> = if vtxl2xy.len() >= 6 {
+        let mut pts = Vec::with_capacity(vtxl2xy.len() / 2);
+        for chunk in vtxl2xy.chunks(2) {
+            pts.push(crate::fracture::Point::new(chunk[0] as f64, chunk[1] as f64));
+        }
+        if pts.len() >= 3 {
+            Some(pts)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let fallback = boundary_centroid(vtxl2xy);
     let sanitized = crate::voronoi::sanitize_site_positions(&mut site_positions, fallback);
     if sanitized > 0 {
@@ -1457,6 +1470,27 @@ fn build_voronoi_geometry(
             "[floorplan] sanitized {} site coordinates before Voronoi construction",
             sanitized
         );
+    }
+    if let Some(boundary_poly) = boundary_polygon_world.as_deref() {
+        let mut alive_indices = Vec::new();
+        let mut alive_points = Vec::new();
+        for (idx, pos) in site_positions.iter().enumerate() {
+            if !alive[idx] {
+                continue;
+            }
+            alive_indices.push(idx);
+            alive_points.push(crate::fracture::Point::new(pos[0] as f64, pos[1] as f64));
+        }
+        if !alive_points.is_empty() {
+            let moved =
+                crate::fracture::push_sites_inside_polygon(alive_points.as_mut_slice(), boundary_poly);
+            if moved > 0 {
+                for (site_idx, pushed_point) in alive_indices.into_iter().zip(alive_points.into_iter()) {
+                    site_positions[site_idx][0] = pushed_point.x as f32;
+                    site_positions[site_idx][1] = pushed_point.y as f32;
+                }
+            }
+        }
     }
     let mut site_coords = Vec::with_capacity(site_positions.len() * 2);
     for pos in &site_positions {
@@ -1548,32 +1582,28 @@ fn build_voronoi_geometry(
                 ));
             }
 
-            let boundary_points = if vtxl2xy.len() >= 6 {
-                let mut pts = Vec::with_capacity(vtxl2xy.len() / 2);
-                for chunk in vtxl2xy.chunks(2) {
-                    pts.push(crate::fracture::Point::new(
-                        (chunk[0] - min_x) as f64,
-                        (chunk[1] - min_y) as f64,
-                    ));
+            let boundary_points = boundary_polygon_world.as_ref().map(|poly| {
+                let mut pts = Vec::with_capacity(poly.len());
+                for p in poly {
+                    pts.push(crate::fracture::Point::new(p.x - offset_x, p.y - offset_y));
                 }
-                if pts.len() >= 3 {
-                    Some(pts)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+                pts
+            });
 
             let mut seed = index_map.len() as u64;
             seed = seed
                 .wrapping_mul(636_413_622_384_679_3005)
                 .wrapping_add(1_442_695_040_888_963_407);
             let mut rng = crate::fracture::Rng::new(seed);
-            let (cells, _) = crate::fracture::compute_voronoi_fracture(
+            // let (cells, _) = crate::fracture::compute_voronoi_fracture(
+            //     fracture_sites,
+            //     width,
+            //     height,
+            //     boundary_points.as_deref(),
+            //     &mut rng,
+            // );
+            let (cells, _) = crate::fracture::compute_voronoi_fracture2(
                 fracture_sites,
-                width,
-                height,
                 boundary_points.as_deref(),
                 &mut rng,
             );
