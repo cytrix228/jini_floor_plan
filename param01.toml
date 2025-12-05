@@ -1,7 +1,7 @@
 [loss_weights]
 each_area = 2
 total_area = 10
-wall_length = 0.5
+wall_length = 3.5
 wall_angle = 3.5
 topology = 5.0
 fix = 200.0
